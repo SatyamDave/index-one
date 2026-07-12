@@ -1,0 +1,63 @@
+name: Attack artifact (real upstream)
+
+# The fundraise claim is a before/after on the SAME scenario: a real upstream
+# verifier ACCEPTS an artifact that IndexOne's composed verify() REJECTS. This
+# job reproduces it against the *real AIP reference SDK* (hash-pinned) on every
+# push/PR, and fails if the real upstream can't run or IndexOne doesn't reject —
+# so CI can never be green on a soft-skipped upstream (docs/CLAIM_TO_ATTACK.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  real-aip:
+    name: real AIP vs IndexOne (before/after, hard check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "exploits -> target"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Build the IndexOne side (the composed-verify exploit) up front.
+      - name: Build exploits
+        run: cargo build --manifest-path exploits/Cargo.toml --bins
+
+      # Install the REAL AIP reference SDK from the hash-pinned lockfile.
+      - name: Install real AIP (hash-pinned)
+        run: pip install --require-hashes -r exploits/real_aip/requirements.lock.txt
+
+      # Hard check: the real AIP verifier MUST accept, IndexOne MUST reject.
+      # `--require-real` turns the local soft-skip into a CI failure.
+      - name: Real AIP before/after
+        run: python exploits/real_aip/sidebyside.py --require-real
+
+  real-ap2:
+    name: real AP2 SD-JWT-VC vs IndexOne (before/after)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "exploits -> target"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build exploits
+        run: cargo build --manifest-path exploits/Cargo.toml --bins
+      - name: Install AP2 crypto deps
+        run: pip install -r exploits/real_ap2/requirements.txt
+      # real_ap2/sidebyside.py exits non-zero unless the real SD-JWT-VC mandate
+      # verifies AND IndexOne rejects the forged cross-org attribution.
+      - name: Real AP2 before/after
+        run: python exploits/real_ap2/sidebyside.py

@@ -72,7 +72,7 @@ Verbatim, quotable stances (primary source):
 
 ## 4. Gaps to a fully reproducible artifact (tracked)
 
-- [ ] Install + **hash-pin** the real AIP SDK (`uv.lock` / `pip-compile --generate-hashes`); a CI job that **fails** if the upstream can't run (today it soft-skips → CI can be green without ever exercising the real upstream).
+- [x] Install + **hash-pin** the real AIP SDK — `exploits/real_aip/requirements.lock.txt` (`pip-compile --generate-hashes`, all-platform hashes); a CI job (`.github/workflows/attack-artifact.yml`) that **fails** if the upstream can't run or IndexOne doesn't reject (`sidebyside.py --require-real` turns the local soft-skip into a hard check). Confirmed live: real `ChainedToken.authorize` → VALID, composed `verify()` → Omission / NotIndependent.
 - [ ] Commit **golden vectors**: the exact upstream token (or bytes + SHA-256) and IndexOne artifact + expected verdicts, so a reviewer reproduces byte-for-byte.
 - [ ] Import **APS's shipped conformance fixtures** → a second real upstream beyond AIP.
 - [ ] Promote **(a)** into `omission_3hop` + conformance once purpose↔digest binding lands.

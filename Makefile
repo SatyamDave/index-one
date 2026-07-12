@@ -18,7 +18,7 @@ CARGO       := cargo
 PYTHON      := python3
 
 .DEFAULT_GOAL := help
-.PHONY: help reproduce build test exploits conformance sidebyside py-test deps-python clean fmt lint
+.PHONY: help reproduce build test exploits conformance sidebyside py-test deps-python require-real clean fmt lint
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -55,8 +55,13 @@ sidebyside: ## Real-upstream side-by-sides (AIP: real SDK if installed; AP2: fai
 py-test: ## Run the Python integrations test suite
 	cd $(INTEGRATIONS) && PYTHONPATH=src $(PYTHON) -m pytest -q
 
-deps-python: ## Install the pinned Python upstreams for the full artifact (real AIP + crypto)
-	$(PYTHON) -m pip install -r exploits/real_aip/requirements.txt -r exploits/real_ap2/requirements.txt
+deps-python: ## Install the hash-pinned Python upstreams for the full artifact (real AIP + crypto)
+	$(PYTHON) -m pip install --require-hashes -r exploits/real_aip/requirements.lock.txt
+	$(PYTHON) -m pip install -r exploits/real_ap2/requirements.txt
+
+require-real: deps-python ## Hard before/after check against the real AIP SDK (as CI runs it)
+	$(PYTHON) exploits/real_aip/sidebyside.py --require-real
+	$(PYTHON) exploits/real_ap2/sidebyside.py
 
 fmt: ## Format the Rust workspace
 	$(CARGO) fmt --manifest-path $(CORE) --all
