@@ -32,13 +32,15 @@ use indexone_revmap::{
     verify_inclusion as verify_map_inclusion, verify_non_inclusion, Hash, MapProof, RevocationMap,
 };
 use indexone_witness::{
-    verify_inclusion as verify_log_inclusion, verify_signed_head, ActionReceipt, Digest,
-    InclusionProof, SignedTreeHead, Witness,
+    verify_inclusion as verify_log_inclusion, ActionReceipt, Digest, InclusionProof, Witness,
 };
 
-// Re-export the witness consistency primitives so a client can detect rollback
-// of the checkpoint sequence with one dependency (the log only ever appends).
-pub use indexone_witness::{verify_consistency, ConsistencyProof};
+// Re-export the witness primitives a client needs (consistency for rollback
+// detection, the signed head to anchor against) so this crate is a single
+// facade — the log only ever appends.
+pub use indexone_witness::{
+    verify_consistency, verify_signed_head, ConsistencyProof, SignedTreeHead,
+};
 
 /// Domain tag marking a witness leaf as a revocation-map checkpoint (kept in the
 /// receipt's `chain_digest` slot, so these leaves are distinguishable and a

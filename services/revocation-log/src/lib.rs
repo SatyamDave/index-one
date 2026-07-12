@@ -30,13 +30,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use indexone_crypto::{Ed25519Signer, PublicKey, Signer};
+use indexone_revlog::{ConsistencyProof, LogBackedProof, LogBackedRevocation, SignedTreeHead};
+use indexone_revmap::Hash;
 use indexone_revocation::{RevocationId, SignedRevocationSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +64,11 @@ type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 #[derive(Clone)]
 pub struct AppState {
     log: Arc<Mutex<RevocationLog>>,
+    /// v2: the log-backed sparse-Merkle revocation map. Shares `signer`, so the
+    /// key that signs its checkpoints is exactly the one at
+    /// `/.well-known/revocation-keys` — i.e. the `log_key` a client pins for
+    /// `verify_not_revoked`.
+    logbacked: Arc<Mutex<LogBackedRevocation>>,
     signer: Arc<Ed25519Signer>,
     operator_key: PublicKey,
     now: Clock,
@@ -90,6 +97,7 @@ impl AppState {
                 reasons: HashMap::new(),
                 epoch: 0,
             })),
+            logbacked: Arc::new(Mutex::new(LogBackedRevocation::new())),
             signer: Arc::new(signer),
             operator_key,
             now,
@@ -111,6 +119,12 @@ pub fn app(state: AppState) -> Router {
         .route("/revocations/v1/snapshot", get(get_snapshot))
         .route("/revocations/v1/revoke", post(revoke))
         .route("/revocations/v1/entries", get(get_entries))
+        // v2: log-backed sparse-Merkle map — cryptographic non-inclusion proofs.
+        .route("/revocations/v2/revoke", post(v2_revoke))
+        .route("/revocations/v2/checkpoint", post(v2_checkpoint))
+        .route("/revocations/v2/head", get(v2_head))
+        .route("/revocations/v2/status", get(v2_status))
+        .route("/revocations/v2/consistency", get(v2_consistency))
         .route("/.well-known/revocation-keys", get(get_keys))
         .with_state(state)
 }
@@ -155,6 +169,10 @@ struct KeyEntry {
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
+    /// The request was well-formed but can't be served yet — e.g. a status proof
+    /// requested before any checkpoint covers the current map root. Fail closed
+    /// (mirrors the witness service's 409 idiom), never a false "not revoked".
+    Conflict(String),
 }
 
 impl IntoResponse for ApiError {
@@ -163,6 +181,10 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(detail) => (
                 StatusCode::BAD_REQUEST,
                 serde_json::json!({ "title": "bad request", "detail": detail }),
+            ),
+            ApiError::Conflict(detail) => (
+                StatusCode::CONFLICT,
+                serde_json::json!({ "title": "conflict", "detail": detail }),
             ),
         };
         (status, Json(body)).into_response()
@@ -181,6 +203,15 @@ fn revocation_id_from_hex(s: &str) -> Result<RevocationId, ApiError> {
         ));
     }
     Ok(RevocationId(bytes))
+}
+
+/// Parse a 32-byte map key from hex (the `RevocationId` bytes a v2 client uses).
+fn hash_from_hex(s: &str) -> Result<Hash, ApiError> {
+    let bytes =
+        hex::decode(s.trim()).map_err(|_| ApiError::BadRequest("key must be hex".into()))?;
+    bytes
+        .try_into()
+        .map_err(|_| ApiError::BadRequest("key must be 32 bytes (64 hex chars)".into()))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -232,6 +263,97 @@ async fn get_keys(State(st): State<AppState>) -> Json<KeysDto> {
             alg: "ed25519",
         }],
     })
+}
+
+// ── v2 handlers: log-backed map ─────────────────────────────────────────────
+//
+// These serve `indexone-revlog` types (`LogBackedProof`, `SignedTreeHead`,
+// `ConsistencyProof`) as their **native serde JSON**, exactly like
+// `get_snapshot` serves `SignedRevocationSnapshot`: every one derives
+// Serialize/Deserialize, so a Rust client deserializes and calls
+// `verify_not_revoked` with no DTO reconstruction — wire-compatible by
+// construction. Digests therefore render as JSON arrays, not base64url (the
+// witness service's base64url DTOs target RFC 6962 interop; this service does
+// not, and mixing conventions in one service is the thing to avoid).
+
+#[derive(Deserialize)]
+pub struct KeyQuery {
+    /// The 32-byte map key (a `RevocationId`) as lowercase hex.
+    key: String,
+}
+
+#[derive(Deserialize)]
+pub struct ConsistencyQuery {
+    first: usize,
+    second: usize,
+}
+
+/// Mark a key revoked in the log-backed map. Like the core, this does NOT
+/// publish — a proof is only ever served against a *checkpointed* root, so a
+/// client must POST `/checkpoint` after revoking (mirrors revlog's contract).
+async fn v2_revoke(
+    State(st): State<AppState>,
+    Json(req): Json<RevokeRequest>,
+) -> Result<StatusCode, ApiError> {
+    let key = hash_from_hex(&req.revocation_id)?;
+    st.logbacked
+        .lock()
+        .expect("logbacked mutex poisoned")
+        .revoke(key);
+    Ok(StatusCode::CREATED)
+}
+
+/// Freeze the current map root into the append-only log and return the new
+/// signed tree head — after this, status proofs verify against a logged root.
+async fn v2_checkpoint(State(st): State<AppState>) -> (StatusCode, Json<SignedTreeHead>) {
+    let sth = st
+        .logbacked
+        .lock()
+        .expect("logbacked mutex poisoned")
+        .publish_checkpoint(&*st.signer);
+    (StatusCode::CREATED, Json(sth))
+}
+
+/// The current signed tree head (a client's last-seen anchor for consistency).
+async fn v2_head(State(st): State<AppState>) -> Json<SignedTreeHead> {
+    Json(
+        st.logbacked
+            .lock()
+            .expect("logbacked mutex poisoned")
+            .signed_head(&*st.signer),
+    )
+}
+
+/// A log-backed non-inclusion proof ("prove NOT revoked") for `key`, against
+/// the latest checkpoint. 409 if no checkpoint yet covers the current map root
+/// (fail closed) — never a false "not revoked".
+async fn v2_status(
+    State(st): State<AppState>,
+    Query(q): Query<KeyQuery>,
+) -> Result<Json<LogBackedProof>, ApiError> {
+    let key = hash_from_hex(&q.key)?;
+    let proof = {
+        let rl = st.logbacked.lock().expect("logbacked mutex poisoned");
+        rl.prove(&key, &*st.signer)
+    };
+    proof.map(Json).ok_or(ApiError::Conflict(
+        "no checkpoint covers the current map root; POST /revocations/v2/checkpoint".into(),
+    ))
+}
+
+/// A consistency proof `first → second` over the checkpoint log, so a client
+/// can confirm it only appended (rollback/equivocation detection).
+async fn v2_consistency(
+    State(st): State<AppState>,
+    Query(q): Query<ConsistencyQuery>,
+) -> Result<Json<ConsistencyProof>, ApiError> {
+    let proof = {
+        let rl = st.logbacked.lock().expect("logbacked mutex poisoned");
+        rl.consistency_proof(q.first, q.second)
+    };
+    proof.map(Json).ok_or(ApiError::BadRequest(
+        "invalid sizes: need first <= second <= current tree size".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -394,5 +516,146 @@ mod tests {
 
         assert!(matches!(checker_result.0, RevocationStatus::Revoked { .. }));
         assert_eq!(checker_result.1, RevocationStatus::Live);
+    }
+
+    // ── v2 log-backed endpoints ──────────────────────────────────────────────
+
+    /// A 32-byte map key (a stand-in RevocationId) and its lowercase hex.
+    fn v2_key(tag: u8) -> ([u8; 32], String) {
+        let k = [tag; 32];
+        (k, hex::encode(k))
+    }
+
+    /// The v2 loop over HTTP: revoke → checkpoint → GET status proof →
+    /// deserialize the NATIVE LogBackedProof and verify offline. A live key
+    /// verifies not-revoked; the revoked key does not — exactly what a client
+    /// with the pinned operator key does, no DTO reconstruction.
+    #[tokio::test]
+    async fn v2_status_proof_verifies_offline() {
+        use indexone_revlog::{verify_not_revoked, verify_revoked};
+
+        let st = state_at(5_000);
+        let (revoked_bytes, revoked_hex) = v2_key(3);
+        let (live_bytes, live_hex) = v2_key(4);
+
+        // Revoke one key (map only), then publish a checkpoint so proofs exist.
+        let (rs, _) = json_request(
+            app(st.clone()),
+            "POST",
+            "/revocations/v2/revoke",
+            serde_json::json!({ "revocation_id": revoked_hex, "reason": "leaked" }),
+        )
+        .await;
+        assert_eq!(rs, StatusCode::CREATED);
+        let (cs, _) = json_request(
+            app(st.clone()),
+            "POST",
+            "/revocations/v2/checkpoint",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(cs, StatusCode::CREATED);
+
+        // Live key → proof verifies non-inclusion, and NOT inclusion.
+        let (status, body) = json_request(
+            app(st.clone()),
+            "GET",
+            &format!("/revocations/v2/status?key={live_hex}"),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let proof: LogBackedProof = serde_json::from_value(body).unwrap();
+        assert!(verify_not_revoked(&proof, &live_bytes, &st.operator_key));
+        assert!(!verify_revoked(&proof, &live_bytes, &st.operator_key));
+
+        // Revoked key → proof verifies inclusion, and NOT non-inclusion.
+        let (_s, rbody) = json_request(
+            app(st.clone()),
+            "GET",
+            &format!("/revocations/v2/status?key={revoked_hex}"),
+            serde_json::Value::Null,
+        )
+        .await;
+        let rproof: LogBackedProof = serde_json::from_value(rbody).unwrap();
+        assert!(verify_revoked(&rproof, &revoked_bytes, &st.operator_key));
+        assert!(!verify_not_revoked(
+            &rproof,
+            &revoked_bytes,
+            &st.operator_key
+        ));
+    }
+
+    /// Fail closed: a status proof requested before any checkpoint covers the
+    /// current map root is 409, never a false "not revoked".
+    #[tokio::test]
+    async fn v2_status_before_checkpoint_is_409() {
+        let st = state_at(1_000);
+        let (_bytes, hex_key) = v2_key(1);
+        let (status, _) = json_request(
+            app(st),
+            "GET",
+            &format!("/revocations/v2/status?key={hex_key}"),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    /// The checkpoint log is append-only: two checkpoints yield a consistency
+    /// proof, and the served heads are validly signed by the operator key.
+    #[tokio::test]
+    async fn v2_consistency_tracks_checkpoints() {
+        use indexone_revlog::{verify_consistency, verify_signed_head};
+
+        let st = state_at(2_000);
+        // Checkpoint 0 (empty), then revoke + checkpoint 1.
+        let (_s0, b0) = json_request(
+            app(st.clone()),
+            "POST",
+            "/revocations/v2/checkpoint",
+            serde_json::Value::Null,
+        )
+        .await;
+        let sth0: SignedTreeHead = serde_json::from_value(b0).unwrap();
+        let (_, hex_key) = v2_key(9);
+        json_request(
+            app(st.clone()),
+            "POST",
+            "/revocations/v2/revoke",
+            serde_json::json!({ "revocation_id": hex_key, "reason": "x" }),
+        )
+        .await;
+        let (_s1, b1) = json_request(
+            app(st.clone()),
+            "POST",
+            "/revocations/v2/checkpoint",
+            serde_json::Value::Null,
+        )
+        .await;
+        let sth1: SignedTreeHead = serde_json::from_value(b1).unwrap();
+
+        assert!(verify_signed_head(&sth0, &st.operator_key));
+        assert!(verify_signed_head(&sth1, &st.operator_key));
+
+        let (status, body) = json_request(
+            app(st.clone()),
+            "GET",
+            &format!(
+                "/revocations/v2/consistency?first={}&second={}",
+                sth0.tree_size, sth1.tree_size
+            ),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let proof: ConsistencyProof = serde_json::from_value(body).unwrap();
+        assert!(verify_consistency(
+            &sth0.root,
+            &sth1.root,
+            &proof,
+            sth0.tree_size,
+            sth1.tree_size
+        ));
     }
 }
