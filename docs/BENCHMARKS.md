@@ -91,28 +91,39 @@ signature-verify + inclusion check) — linear, no surprises.
 
 ### Witness operations (`indexone-witness`)
 
-`benches/witness_ops.rs`, criterion medians across log size S:
+`benches/witness_ops.rs`, criterion medians across log size S — **after** the
+interior-node memoization (see below):
 
 | op | S=100 | S=1,000 | S=10,000 |
 |---|---|---|---|
-| `append` (one more leaf) | 9.4 µs | 22.4 µs | 144 µs |
-| `inclusion_proof` (generate) | 38.6 µs | 396 µs | **3.92 ms** |
-| `verify_inclusion` | 8.96 µs | 9.49 µs | 9.91 µs |
-| `consistency_proof` (generate) | 37.3 µs | 382 µs | **3.85 ms** |
-| `verify_consistency` | 953 ns | 1.53 µs | 1.75 µs |
-| `signed_head` (STH) | 49.4 µs | 391 µs | **3.87 ms** |
-| `verify_signed_head` | 23.9 µs | 23.3 µs | 23.4 µs |
+| `append` (one more leaf) | 8.5 µs | 9.2 µs | 13.0 µs |
+| `inclusion_proof` (generate) | 278 ns | 777 ns | 720 ns |
+| `verify_inclusion` | 8.88 µs | 9.35 µs | 9.98 µs |
+| `consistency_proof` (generate) | 267 ns | 758 ns | 721 ns |
+| `verify_consistency` | 957 ns | 1.56 µs | 1.80 µs |
+| `signed_head` (STH) | 11.7 µs | 12.0 µs | 11.8 µs |
+| `verify_signed_head` | 23.4 µs | 23.3 µs | 23.4 µs |
 
-**Scaling — the one thing to fix before the log grows large.** The *verify*
-paths are cheap and flat: inclusion verify is <10 µs and consistency verify is
-<2 µs at any size — a relying party's cost is size-independent. But the *prove*
-paths (`inclusion_proof`, `consistency_proof`) and `signed_head` scale **~O(S),
-not O(log S)**: the current `indexone-witness` recomputes subtree roots on demand
-instead of caching interior nodes, so proof/STH generation on the witness server
-hits ~3.9 ms at 10k leaves. This is a known, bounded optimization (interior-node
-caching or an incremental tree) — the correctness is unaffected, only the
-server-side generation cost. Verification, the part relying parties pay for,
-stays fast.
+**Scaling — now O(log n), was O(n).** Both the *verify* and *prove* paths are now
+flat in log size. Earlier, proof/STH *generation* scaled ~O(S) because the tree
+recomputed subtree roots (and re-hashed the ~1 KB receipts) on every call —
+~3.9 ms to generate a proof at 10k leaves. The witness now **memoizes the roots
+of perfect, aligned subtrees** (immutable in an append-only log, so the cache
+needs no invalidation) and caches leaf hashes, so generation is O(log n):
+
+| generate @ 10k leaves | before | after | speedup |
+|---|---|---|---|
+| `inclusion_proof` | 3.92 ms | 720 ns | **~5,400×** |
+| `consistency_proof` | 3.85 ms | 721 ns | **~5,300×** |
+| `signed_head` | 3.87 ms | 11.8 µs | **~330×** |
+| `append` | 144 µs | 13.0 µs | **~11×** |
+
+The output is **byte-identical** to the naive RFC 6962 recomputation — proven by
+an exhaustive differential oracle in the crate's tests (every root for sizes
+0–300, every inclusion path for all sizes/indices to 200, every consistency proof
+for all prefix pairs to 150). So a witness server can now generate proofs in
+sub-microsecond time at 10k+ leaves with no change to any root, proof, or signed
+tree head a relying party verifies.
 
 ## Reading the numbers honestly
 
@@ -135,10 +146,11 @@ stays fast.
   sub-millisecond through 10 hops — the witness-inclusion + independent-attestation
   layer adds a ~70 µs floor over `Chain::verify` (see the composed table). Quote
   the composed delta, not the raw thermal-loaded absolutes.
-- **Witness proof *generation* scales ~O(S)** (interior-node caching is the fix);
-  witness *verification* is flat and cheap. Optimize server-side proof generation
-  before the log grows large; relying-party verification is already fast at any
-  size.
+- **Witness proof generation and verification are both O(log n) and flat** —
+  interior-node memoization landed, so proof/STH generation is sub-microsecond to
+  low-µs even at 10k+ leaves (was ~3.9 ms), byte-identical to the naive
+  recomputation. The witness server is no longer a scaling bottleneck for proof
+  serving.
 
 ## What this does *not* claim
 
