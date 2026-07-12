@@ -75,6 +75,33 @@ impl ActionReceipt {
     }
 }
 
+/// Domain separation for the purpose-bound action digest (kept distinct from the
+/// leaf/node tags above so an action digest can never be reinterpreted as a tree
+/// hash).
+const ACTION_DIGEST_DOMAIN: &[u8] = b"indexone-witness/action-digest/v1";
+
+/// Bind an action digest to the delegated **purpose** and the action's params:
+/// `blake3(DOMAIN ‖ len(purpose) ‖ purpose ‖ params_digest)`.
+///
+/// Computing a receipt's `action_digest` this way makes it no longer an opaque,
+/// caller-chosen value: a verifier can recompute the digest from the purpose the
+/// final hop was actually delegated for and the declared params, so an action
+/// witnessed under a *different* purpose (or with different params) yields a
+/// different digest and is caught ([`crate`] users: see `indexone-verifier`'s
+/// `verify_action_purpose_binding`). Closes VERIFIER_AUDIT finding #2.
+///
+/// Honest scope (CLAUDE.md §4): this binds the digest to the *declared* purpose
+/// and params — not to ground truth about what physically happened. The witness
+/// anchors what was reported.
+pub fn bind_action(purpose: &str, params_digest: &Digest) -> Digest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ACTION_DIGEST_DOMAIN);
+    hasher.update(&(purpose.len() as u64).to_be_bytes());
+    hasher.update(purpose.as_bytes());
+    hasher.update(params_digest);
+    *hasher.finalize().as_bytes()
+}
+
 /// One sibling on an inclusion (audit) path: its digest and which side it sits
 /// on relative to the running hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

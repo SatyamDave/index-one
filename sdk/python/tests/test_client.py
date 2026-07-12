@@ -21,6 +21,7 @@ from indexone import (
     Scope,
     attenuate,
     attest,
+    bind_action,
     chain_digest,
     composed_verify,
     issue,
@@ -220,6 +221,61 @@ def test_omitted_action_is_invalid_through_sdk() -> None:
             omitted_receipt,
             completion,
             trusted_attesters=[notary_key],
+        )
+
+
+@pytest.mark.skipif(not _cli_available(), reason="indexone-cli not built")
+def test_purpose_binding_through_sdk() -> None:
+    # A purpose-bound action for the final hop's purpose verifies; an action bound
+    # to a DIFFERENT purpose fails closed (VerifyError::PurposeMismatch).
+    chain, root_key, cd = _three_hop_chain()
+    nonce = hashlib.sha256(b"nonce-1").hexdigest()
+    params = hashlib.sha256(b"amount=4000,to=airline").hexdigest()
+    notary_key = pubkey("09" * 32)
+
+    good = bind_action("hop to agent:c@org3", params)  # the final hop's purpose
+    w = witness_append(cd, good, nonce)
+    completion = attest(
+        "09" * 32,
+        Principal("attester:notary", "Notary"),
+        cd,
+        good,
+        good,
+        w["root"],
+        w["inclusion_proof"],
+    )
+    effective = composed_verify(
+        chain,
+        root_key,
+        w["root"],
+        w["receipt"],
+        completion,
+        trusted_attesters=[notary_key],
+        params_digest_hex=params,
+    )
+    assert effective.budget == 4_000
+
+    # Same params, WRONG purpose → the witnessed digest isn't purpose-bound.
+    wrong = bind_action("wire funds offshore", params)
+    w2 = witness_append(cd, wrong, nonce)
+    completion2 = attest(
+        "09" * 32,
+        Principal("attester:notary", "Notary"),
+        cd,
+        wrong,
+        wrong,
+        w2["root"],
+        w2["inclusion_proof"],
+    )
+    with pytest.raises(IndexOneError, match="purpose"):
+        composed_verify(
+            chain,
+            root_key,
+            w2["root"],
+            w2["receipt"],
+            completion2,
+            trusted_attesters=[notary_key],
+            params_digest_hex=params,
         )
 
 

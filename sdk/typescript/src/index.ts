@@ -150,6 +150,13 @@ export function chainDigest(chain: Chain): string {
   return invoke({ cmd: "chain_digest", chain })["digest"] as string;
 }
 
+/** The purpose-bound action digest (hex) for `(purpose, paramsDigest)`. Use it as
+ *  the `action_digest` you witness, then enforce it via
+ *  {@link composedVerify} `paramsDigestHex` — closes the opaque-digest gap. */
+export function bindAction(purpose: string, paramsDigestHex: string): string {
+  return invoke({ cmd: "bind_action", purpose, params_digest: paramsDigestHex })["digest"] as string;
+}
+
 /** Append an action receipt to the transparency witness. Returns the receipt, the
  *  updated `log`, the new Merkle `root` (hex), and an `inclusion_proof`. The
  *  witness is stateless: thread `log` back on each call. An action with no
@@ -211,9 +218,9 @@ export function composedVerify(
   trustedRootHex: string,
   actionReceipt: Receipt,
   completion: Completion,
-  opts: { trustedAttesters?: PublicKey[]; allowCounterSigned?: boolean } = {},
+  opts: { trustedAttesters?: PublicKey[]; allowCounterSigned?: boolean; paramsDigestHex?: string } = {},
 ): Scope {
-  const resp = invoke({
+  const request: Record<string, unknown> = {
     cmd: "composed_verify",
     chain,
     root_key: rootKey,
@@ -224,8 +231,10 @@ export function composedVerify(
       trusted_attesters: opts.trustedAttesters ?? [],
       allow_counter_signed: opts.allowCounterSigned ?? false,
     },
-  });
-  return resp["effective_scope"] as Scope;
+  };
+  // Pass params_digest to also enforce the purpose<->digest binding.
+  if (opts.paramsDigestHex !== undefined) request["params_digest"] = opts.paramsDigestHex;
+  return invoke(request)["effective_scope"] as Scope;
 }
 
 /** Wraps one agent's identity (a 32-byte hex seed + principal). */

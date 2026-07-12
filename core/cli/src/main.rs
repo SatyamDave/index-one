@@ -15,6 +15,7 @@
 //! verify          {chain, root_key} -> {ok, effective_scope}          (chain only)
 //! pubkey          {seed} -> {ok, public_key}
 //! chain_digest    {chain} -> {ok, digest}
+//! bind_action     {purpose, params_digest} -> {ok, digest}   (purpose-bound)
 //! witness_append  {log?, chain_digest, action_digest, nonce, prev_root}
 //!                   -> {ok, receipt, log, leaf_index, root, inclusion_proof}
 //! attest          {seed, attester, chain_digest, requested_action, outcome,
@@ -33,8 +34,8 @@ use std::io::{Read, Write};
 use indexone_attestation::{AttesterRole, CompletionAttestation};
 use indexone_chain::{Chain, Principal, Scope};
 use indexone_crypto::{Ed25519Signer, PublicKey, Signer};
-use indexone_verifier::{verify, VerifiableAction, VerifyPolicy};
-use indexone_witness::{ActionReceipt, Digest, InclusionProof, Witness};
+use indexone_verifier::{verify, verify_with_purpose, VerifiableAction, VerifyPolicy};
+use indexone_witness::{bind_action, ActionReceipt, Digest, InclusionProof, Witness};
 use serde::{Deserialize, Serialize};
 
 /// Attestation flow, mirrors `indexone_attestation::AttesterRole` on the wire.
@@ -93,6 +94,13 @@ enum Request {
     ChainDigest {
         chain: Chain,
     },
+    /// The purpose-bound action digest for `(purpose, params_digest)` — use its
+    /// result as `action_digest` so the witnessed action commits to the delegated
+    /// purpose (closes the opaque-digest gap; VERIFIER_AUDIT #2).
+    BindAction {
+        purpose: String,
+        params_digest: String,
+    },
     WitnessAppend {
         #[serde(default)]
         log: Vec<ActionReceipt>,
@@ -120,6 +128,10 @@ enum Request {
         completion: CompletionAttestation,
         #[serde(default)]
         policy: PolicyDto,
+        /// When present, also verify the action digest is bound to the final
+        /// hop's purpose over these params (runs `verify_with_purpose`).
+        #[serde(default)]
+        params_digest: Option<String>,
     },
 }
 
@@ -236,6 +248,13 @@ fn handle(req: Request) -> Result<Response, String> {
             ok: true,
             digest: hex::encode(chain.digest()),
         }),
+        Request::BindAction {
+            purpose,
+            params_digest,
+        } => Ok(Response::Digest {
+            ok: true,
+            digest: hex::encode(bind_action(&purpose, &digest_from_hex(&params_digest)?)),
+        }),
         Request::WitnessAppend {
             log,
             chain_digest,
@@ -304,6 +323,7 @@ fn handle(req: Request) -> Result<Response, String> {
             action_receipt,
             completion,
             policy,
+            params_digest,
         } => {
             let trusted_root = digest_from_hex(&trusted_root)?;
             let action = VerifiableAction {
@@ -315,8 +335,18 @@ fn handle(req: Request) -> Result<Response, String> {
                 trusted_attesters: policy.trusted_attesters,
                 allow_counter_signed: policy.allow_counter_signed,
             };
-            let effective_scope = verify(&action, &root_key, &trusted_root, &verify_policy)
-                .map_err(|e| e.to_string())?;
+            // With `params_digest`, also enforce the purpose<->digest binding.
+            let effective_scope = match params_digest {
+                Some(pd) => verify_with_purpose(
+                    &action,
+                    &root_key,
+                    &trusted_root,
+                    &verify_policy,
+                    &digest_from_hex(&pd)?,
+                ),
+                None => verify(&action, &root_key, &trusted_root, &verify_policy),
+            }
+            .map_err(|e| e.to_string())?;
             Ok(Response::Scope {
                 ok: true,
                 effective_scope,
