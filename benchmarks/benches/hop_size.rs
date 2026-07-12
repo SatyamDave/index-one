@@ -12,6 +12,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use indexone_chain::{Chain, Principal, Scope};
 use indexone_crypto::{Ed25519Signer, Signer};
+use indexone_witness::{ActionReceipt, Witness};
 
 fn principal(id: &str) -> Principal {
     Principal {
@@ -63,6 +64,38 @@ fn bench_hop_size(c: &mut Criterion) {
         "current JSON-encoded DelegationBlock size: {size} bytes \
          (real Ed25519 sig + embedded keys; target: compact binary encoding)"
     );
+
+    // The witness log's storage/bandwidth story: what one leaf costs, and how an
+    // inclusion proof grows with log depth (~log2 n siblings).
+    let receipt = ActionReceipt {
+        chain_digest: [1u8; 32],
+        action_digest: [2u8; 32],
+        nonce: [3u8; 32],
+        prev_root: [0u8; 32],
+    };
+    let leaf = receipt.canonical_bytes().len();
+    let receipt_json = serde_json::to_vec(&receipt).expect("serialize").len();
+    println!("ActionReceipt (witness leaf): canonical/JCS {leaf} bytes, JSON {receipt_json} bytes");
+
+    for n in [128usize, 16_384usize] {
+        let mut w = Witness::new();
+        for i in 0..n {
+            let mut d = [0u8; 32];
+            d[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            w.append(&ActionReceipt {
+                chain_digest: [1u8; 32],
+                action_digest: d,
+                nonce: d,
+                prev_root: [0u8; 32],
+            });
+        }
+        let proof = w.inclusion_proof(n / 2).expect("in range");
+        let proof_json = serde_json::to_vec(&proof).expect("serialize").len();
+        println!(
+            "inclusion proof @ {n} leaves: {} siblings, JSON {proof_json} bytes",
+            proof.path.len()
+        );
+    }
 }
 
 criterion_group!(benches, bench_hop_size);
