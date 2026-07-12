@@ -1,0 +1,32 @@
+[package]
+name = "indexone-witness-service"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "The hosted IndexOne witness — a cross-org transparency-log HTTP service over indexone-witness (submit receipts, signed tree heads, inclusion/consistency proofs, gossip). RFC 6962 / SCITT-aligned."
+
+# Standalone package (like /exploits, /conformance): NOT a member of the /core
+# workspace, so axum/tokio never enter the lean, async-free core. TLS is
+# deliberately not enabled (terminate at a proxy) to keep `cargo audit` off the
+# unmaintained `ring` advisory.
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+hex = "0.4"
+indexone-witness = { path = "../../core/witness" }
+indexone-crypto = { path = "../../core/crypto" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[[bin]]
+name = "indexone-witness-service"
+path = "src/main.rs"
+
+[lib]
+name = "indexone_witness_service"
+path = "src/lib.rs"
