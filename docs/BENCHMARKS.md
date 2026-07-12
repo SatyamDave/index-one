@@ -10,9 +10,13 @@
 ## Reproduce
 
 ```bash
-cargo bench --manifest-path benchmarks/Cargo.toml
+cargo bench --manifest-path benchmarks/Cargo.toml   # the IndexOne benches below
+make require-real                                    # the real AIP side-by-side (latency + correctness)
 ```
 
+- `exploits/real_aip/sidebyside.py` — runs the **real** AIP verifier
+  (`agent-identity-protocol`, hash-pinned) and times its `authorize()`, next to
+  IndexOne, on the same 3-hop scenario. See "Real AIP side-by-side" below.
 - `benches/verify_latency.rs` — full `Chain::verify(&root_key)` over chains of
   1/3/5/10 real hops (Ed25519 signature check + blake3 hash-link check + the
   attenuation invariants, per hop).
@@ -96,6 +100,46 @@ independent attesters — is the moat, and it is cheap.
 Each additional independent attester is a clean **~+44 µs** (one more Ed25519
 signature-verify + inclusion check) — linear, no surprises. Independent attestation
 costs microseconds; that is the number to lead with, not raw verify latency.
+
+### Real AIP side-by-side — correctness first, then latency
+
+`exploits/real_aip/sidebyside.py` runs the **actual AIP reference verifier**
+(`agent-identity-protocol`, hash-pinned) on the same 3-hop cross-org scenario,
+next to IndexOne. This replaces "vs AIP's paper" with "vs AIP's code."
+
+**Correctness (the claim).** Both real verifiers agree the delegation is
+authentic and attenuated — AIP `authorize()` → **VALID**, IndexOne chain check →
+**VALID**. IndexOne's composed `verify()` additionally returns **INVALID** on the
+omitted action (no witness inclusion) and the self-reported completion (not
+independently attested) — the two things AIP's signature-and-attenuation model
+structurally cannot catch. That before/after is the point; the latency below is
+only reassurance.
+
+**Latency (same machine, same session; measured, not quoted from a paper):**
+
+| operation | latency | runtime |
+|---|---|---|
+| AIP `authorize()` (chain auth: sigs + scope⊆ + budget + depth) | **165 µs** | Python (over Rust `biscuit` bindings) |
+| IndexOne `Chain::verify` (the like-for-like chain auth) | **191 µs** | Rust |
+| IndexOne composed `verify()` (+ witness completeness + independent attestation) | **311 µs** | Rust |
+
+**Read this honestly:**
+
+- **We do not claim a speed advantage.** The comparable step — chain
+  authentication + attenuation — is essentially the same in both (AIP 165 µs vs
+  IndexOne 191 µs); AIP's biscuit-backed verifier is right there with us. Anyone
+  who leads a witness/attestation pitch with "we're faster" is inviting a speed
+  race they don't need. Lead with *what we catch*.
+- **The extra guarantees are cheap.** Composed `verify()` does strictly more than
+  either chain-only verifier — and costs **~+120 µs over IndexOne's own chain-only
+  path** (311 − 191; an IndexOne-vs-IndexOne delta, so language-independent). Still
+  sub-millisecond, still local, still no callback.
+- **Caveat (runtime, not algorithm).** AIP is Python over Rust `biscuit`;
+  IndexOne's core is Rust. Treat these as implementations *as they ship*, not a
+  language-normalized algorithm comparison — a clean like-for-like would need a
+  native (PyO3) binding of IndexOne's verifier, which is not built. The numbers
+  are honest and reproducible (`make require-real`); they are not a claim that one
+  algorithm is intrinsically faster than another.
 
 ### Witness operations (`indexone-witness`)
 
