@@ -16,12 +16,19 @@ stay off the `ring` advisory.
 ## Run
 
 ```bash
-# fixed operator key (stable signed tree heads) + address:
+# fixed operator key (stable signed tree heads) + address + durable log:
 INDEXONE_WITNESS_SEED=$(python3 -c "print('07'*32)") \
 INDEXONE_WITNESS_ADDR=127.0.0.1:8791 \
+INDEXONE_WITNESS_DB=./witness.log \
 cargo run --manifest-path services/witness/Cargo.toml --bin indexone-witness-service
-# (omit the seed to generate a fresh key each start)
+# (omit the seed to generate a fresh key each start; omit the DB for an
+#  in-memory, ephemeral log)
 ```
+
+`INDEXONE_WITNESS_DB` points at a durable append-only log file. When set, every
+submitted receipt is persisted (and flushed) before it is acked, and the whole
+tree — root, size, and all inclusion proofs — is replayed from the file on
+restart, so a restart does not lose or fork the log.
 
 ## API (RFC 6962 §4 / SCITT SCRAPI aligned)
 
@@ -56,7 +63,9 @@ served. Plus a live end-to-end run over a bound port.
 ## Not yet (documented TODOs)
 - **Proof by leaf hash** (`?hash=`) needs a service-side `leaf_hash → index` map;
   v1 is by `leaf_index` only.
-- **Persistence** — the log is in-memory; a durable store is the next step.
+- **Persistence backends** — a durable append-only file log ships now
+  (`INDEXONE_WITNESS_DB`); a compacting/indexed store (or an object-store backend)
+  for very large logs is a later step.
 - **`get-entries`** bulk replay for auditors (a policy decision, since leaves may
   reference private action digests).
 - A signed **timestamp** in the STH (would require extending `sth_signing_bytes`

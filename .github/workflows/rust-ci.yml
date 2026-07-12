@@ -53,3 +53,18 @@ jobs:
         with:
           workspaces: "core -> target"
       - run: cargo build --manifest-path core/Cargo.toml --workspace --release
+
+  witness-service:
+    name: witness service (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "services/witness -> target"
+      - run: cargo fmt --manifest-path services/witness/Cargo.toml --all --check
+      - run: cargo clippy --manifest-path services/witness/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path services/witness/Cargo.toml
