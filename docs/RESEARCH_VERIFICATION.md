@@ -87,3 +87,48 @@ These are places `REFERENCE.md` / `CLAUDE.md` / positioning are wrong or oversta
 - The **substrate framing is sound** (Biscuit = public-key successor to Macaroons; RFC 6962 gives us inclusion + consistency proofs; SCITT is a real witness architecture to build on).
 - The **gap is real** and articulated by credible bodies — but in **prescriptive/deferred** terms (WIMSE re-binding; DRP/EMILIA deferring to an unbuilt SCITT log; AIP conceding self-report). Our honest one-liner: *the drafts recognize cross-org completeness/honest-completion and either defer it to a transparency log nobody runs cross-org, or leave it to implementations — we build that layer.*
 - **Lead with what is defensible:** self-reported-completion (AIP's own admission) + omission/completeness (our identified gap, grounded in the CT/SCITT model). Avoid attributing our threat labels to specs that don't use them.
+
+---
+
+## 8. AIP reference implementation — for the real side-by-side
+
+Three agents verified (and one **installed and ran**) the actual AIP reference impl,
+so `exploits/` can run the genuine AIP verifier next to `IndexOne::verify`, not a
+stand-in.
+
+**It exists, and it's the author's own.** `github.com/sunilp/aip` (Sunil Prakash —
+same author as arXiv 2603.24775 / `draft-prakash-aip-00`), **Apache-2.0**. Python
+on PyPI: **`agent-identity-protocol` v0.3.0** (`pip install`); Rust crates live
+in-repo (`rust/aip-core|aip-token|aip-mcp`, **not** on crates.io — build from
+source). *Do not confuse* the DID-based namesakes (`openagentidentityprotocol`,
+`The-Nexus-Guard/aip`, crates.io `aip`, PyPI `aip-sdk`) — none are Prakash's.
+
+**Safe to run headless (verdict A, reproduced).** `CompactToken.verify(token, pubkey)`
+and the chained/Biscuit path are pure offline Ed25519 — no network, server,
+secrets, or filesystem writes (the `httpx` dep is only the optional `aip-proxy`
+server). Install pulled prebuilt wheels only; the repo's own `pytest` (compact +
+chained + policy) passed 18/18 offline.
+
+**Verifier entry points:** Python `CompactToken.verify(token_str, public_key_bytes)`
+(`aip_token/compact.py`), `ChainedToken.authorize(scope, root_public_key_bytes)`;
+CLI `aip-proxy` (verifies `X-AIP-Token`). Rust `CompactToken::verify(&str, &[u8;32])`.
+
+**What AIP's verifier checks** (draft §4.1, 5 steps): (1) extract token, (2) verify
+Ed25519 signatures against the issuer identity doc, (3) requested tool ∈ `scope`,
+(4) chain constraints — child scope ⊆ parent, child budget ≤ parent, depth <
+`max_depth`, **non-empty `context`**, expiry — (5) inject identity. Compact mode =
+JWT (`alg:EdDSA`, `typ:aip+jwt`, claims `iss/sub/scope/budget_usd/max_depth/iat/exp`,
+< 1h). Identity docs canonicalized with **RFC 8785 (JCS)**.
+
+**Honesty for the side-by-side (do not overclaim):**
+- **Self-report → VALID is a verbatim non-goal.** §3.3 / §7: *"Completion blocks
+  are self-reported… Counter-signing and third-party attestation exist as trust
+  escalation options but are not enforced in v1. A dishonest agent can
+  misrepresent its result hash or cost without detection."* AIP validates the
+  completion block's *signature* only, never its truth → returns VALID. Quote this.
+- **Omission → VALID is an *implication*, not a printed §7 sentence.** AIP's verifier
+  never inspects work performed and has no completeness/witness mechanism, so an
+  omitted action passes. Frame it as a consequence of the self-reported/attenuation-
+  only model (§3.3/§7), **not** as a quoted non-goal.
+- The AIP token and the IndexOne chain are the **same delegation scenario in each
+  system's native format**, not identical bytes — say so.
