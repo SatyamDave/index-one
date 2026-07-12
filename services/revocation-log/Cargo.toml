@@ -16,6 +16,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 indexone-revocation = { path = "../../core/revocation" }
+indexone-revlog = { path = "../../core/revlog" }
+indexone-revmap = { path = "../../core/revmap" }
 indexone-crypto = { path = "../../core/crypto" }
 
 [dev-dependencies]
