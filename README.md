@@ -84,11 +84,20 @@ Full detail, rationale, and the papers/prior art behind each of these:
 
 ## Getting started
 
-The Rust core builds, verifies real chains, and passes its tests —
-including the Day-12 kill test. The Python SDK / integrations are still
-thin stubs (except the runnable attack POC).
+**The fastest way to see the whole thing** — a cross-org delegation chain
+witnessed and verified end-to-end, with omission and self-report caught, against
+a live witness service — is one command:
 
 ```bash
+make demo
+```
+
+The full reproducible artifact and the individual pieces:
+
+```bash
+# Everything: build + test + exploits + conformance + real-upstream side-by-sides
+make reproduce
+
 # Rust workspace: build, lint, and run the tests (incl. the Day-12 kill test)
 cargo test  --manifest-path core/Cargo.toml --workspace
 cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets -- -D warnings
@@ -96,7 +105,7 @@ cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets -- -D war
 # See just the verifier's omission / self-report / equivocation cases
 cargo test  --manifest-path core/Cargo.toml -p indexone-verifier
 
-# Cross-org attribution attack demo (runnable; illustrative, not real crypto)
+# Cross-org attribution attack demo (real crypto on the IndexOne side)
 cd integrations && pip install -e . && python -m integrations.attack.poc_cross_org_chain
 
 # Python integrations / SDK (editable install + tests)
