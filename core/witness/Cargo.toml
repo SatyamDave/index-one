@@ -13,5 +13,6 @@ serde_json.workspace = true
 serde_jcs.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
+indexone-crypto = { workspace = true }
 
 [dev-dependencies]
