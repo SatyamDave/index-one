@@ -1,6 +1,7 @@
 # Rust
 /core/target/
 /benchmarks/target/
+/exploits/target/
 **/*.rs.bk
 Cargo.lock.bak
 
