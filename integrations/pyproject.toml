@@ -10,7 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "TODO" } # TODO: confirm MIT vs Apache-2.0, see /LICENSE
 authors = [{ name = "index-one" }]
-dependencies = []
+# `cryptography` powers the real ES256/P-256 SD-JWT-VC mandate (ap2/sdjwt_vc.py),
+# which replaced the earlier "crypto is an injected callable" stand-in.
+dependencies = ["cryptography>=42"]
 
 [project.optional-dependencies]
 dev = [
