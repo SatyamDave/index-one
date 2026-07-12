@@ -5,11 +5,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Short-TTL + transparency-log revocation interface for capability-token chains. Interfaces only, no logic implemented yet."
+description = "Short-TTL + transparency-log revocation for capability-token chains; survives partial-chain compromise (keyless RevocationIds)."
 
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
-indexone-chain = { path = "../chain" }
+blake3.workspace = true
+indexone-chain = { workspace = true }
+indexone-crypto = { workspace = true }
 
 [dev-dependencies]

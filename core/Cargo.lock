@@ -240,7 +240,9 @@ dependencies = [
 name = "indexone-revocation"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "indexone-chain",
+ "indexone-crypto",
  "serde",
  "thiserror",
 ]
