@@ -1,0 +1,27 @@
+[package]
+name = "indexone-verifier-wasm"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "WASM build of the IndexOne composed verify(): local, offline, in-browser/edge verification of a cross-org action — no callback, no chain, microseconds. Compiles the real verifier to wasm32 via wasm-bindgen."
+
+# Standalone package (not a /core workspace member), so wasm-bindgen / getrandom-js
+# never enter the lean core. `cdylib` for the .wasm, `rlib` so a native test can
+# exercise the same entry point.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+# The crypto crate's RNG-dependent paths (keygen) reference getrandom; verify()
+# itself uses no randomness, but the symbol must still link on
+# wasm32-unknown-unknown, so select the browser backend here.
+getrandom = { version = "0.2", features = ["js"] }
+indexone-crypto = { path = "../../core/crypto" }
+indexone-chain = { path = "../../core/chain" }
+indexone-witness = { path = "../../core/witness" }
+indexone-attestation = { path = "../../core/attestation" }
+indexone-verifier = { path = "../../core/verifier" }

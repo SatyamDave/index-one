@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IndexOne — verify in the browser</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      p.sub { color: #777; margin: 0 0 20px; }
+      textarea { width: 100%; height: 200px; font-family: ui-monospace, monospace; font-size: 12.5px; }
+      button { font: inherit; padding: 8px 16px; margin-top: 10px; cursor: pointer; }
+      #out { margin-top: 16px; padding: 12px 14px; border-radius: 8px; font-family: ui-monospace, monospace; font-size: 13px; white-space: pre-wrap; }
+      .valid { background: rgba(18,133,92,.14); border: 1px solid #12855c; }
+      .invalid { background: rgba(198,82,74,.14); border: 1px solid #c6524a; }
+    </style>
+  </head>
+  <body>
+    <h1>Verify a cross-org action — locally, in your browser</h1>
+    <p class="sub">
+      The real IndexOne composed <code>verify()</code>, compiled to WebAssembly. No
+      network, no callback — the proof is in the token. Paste a
+      <code>composed_verify</code> request (from the SDK / <code>indexone-cli</code>) and verify it here.
+    </p>
+    <textarea id="req" spellcheck="false">{
+  "note": "Paste a real composed_verify request here.",
+  "note2": "This placeholder is intentionally malformed, so it fails closed."
+}</textarea>
+    <button id="go">Verify</button>
+    <div id="out"></div>
+
+    <script type="module">
+      // Built by `wasm-pack build --target web` into ../pkg/.
+      import init, { verify_action } from "../pkg/indexone_verifier_wasm.js";
+      const out = document.getElementById("out");
+      let ready = false;
+      init()
+        .then(() => { ready = true; })
+        .catch((e) => { out.textContent = "Failed to load wasm (run `wasm-pack build --target web` first): " + e; });
+
+      document.getElementById("go").addEventListener("click", () => {
+        if (!ready) { out.textContent = "wasm not loaded yet…"; return; }
+        const res = JSON.parse(verify_action(document.getElementById("req").value));
+        out.className = res.ok ? "valid" : "invalid";
+        out.textContent = res.ok
+          ? "VALID ✓  effective scope:\n" + JSON.stringify(res.effective_scope, null, 2)
+          : "INVALID ✕  " + res.error;
+      });
+    </script>
+  </body>
+</html>
