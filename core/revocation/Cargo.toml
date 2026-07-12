@@ -1,0 +1,15 @@
+[package]
+name = "indexone-revocation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Short-TTL + transparency-log revocation interface for capability-token chains. Interfaces only, no logic implemented yet."
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+indexone-chain = { path = "../chain" }
+
+[dev-dependencies]

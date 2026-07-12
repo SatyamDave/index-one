@@ -1,0 +1,42 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+
+  # Python: lint (ruff) + format (black) -- matches python-ci.yml exactly,
+  # so a passing pre-commit run means CI's lint/format jobs will pass too.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^(integrations|sdk/python)/
+
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks:
+      - id: black
+        files: ^(integrations|sdk/python)/
+
+  # Rust: fmt + clippy, run against the /core workspace. Local hooks since
+  # these need a real cargo toolchain, not a pre-commit-managed env.
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt (core)
+        entry: bash -c 'cargo fmt --manifest-path core/Cargo.toml --all'
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (core)
+        entry: bash -c 'cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets -- -D warnings'
+        language: system
+        types: [rust]
+        pass_filenames: false

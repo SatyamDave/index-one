@@ -1,0 +1,21 @@
+name: Benchmarks
+
+# Manual for now -- these benchmark placeholder logic, not real crypto (see
+# /benchmarks/README.md). Flip to running on push once indexone-chain /
+# indexone-crypto have real implementations and the numbers mean something.
+on:
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "benchmarks -> target"
+      - run: cargo bench --manifest-path benchmarks/Cargo.toml

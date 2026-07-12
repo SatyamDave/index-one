@@ -1,0 +1,23 @@
+[package]
+name = "indexone-benchmarks"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Verification-latency and per-hop-size benchmarks for index-one. Currently benchmark placeholder logic only -- see benches/*.rs TODOs."
+
+[dependencies]
+# Path deps into /core, ready to wire real benches to once implemented.
+indexone-chain = { path = "../core/chain" }
+indexone-crypto = { path = "../core/crypto" }
+serde_json = "1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "verify_latency"
+harness = false
+
+[[bench]]
+name = "hop_size"
+harness = false

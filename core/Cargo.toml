@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["chain", "crypto", "revocation"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "TODO"          # TODO: confirm MIT vs Apache-2.0, see /LICENSE
+repository = "https://github.com/SatyamDave/index-one"
+publish = false           # not ready to publish to crates.io yet
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
