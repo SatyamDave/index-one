@@ -270,6 +270,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexone-revmap"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "serde",
+]
+
+[[package]]
 name = "indexone-revocation"
 version = "0.0.1"
 dependencies = [

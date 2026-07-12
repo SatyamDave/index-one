@@ -16,6 +16,7 @@ members = [
     "crypto",
     "chain",
     "revocation",
+    "revmap",
     "witness",
     "attestation",
     "verifier",
