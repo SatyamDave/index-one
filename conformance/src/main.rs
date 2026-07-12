@@ -25,7 +25,7 @@ fn principal(id: &str) -> Principal {
 
 fn scope(budget: u64, depth: u32) -> Scope {
     Scope {
-        permissions: vec!["payments.charge".to_string()],
+        permissions: vec!["payments.charge".into()],
         budget: Some(budget),
         currency: Some("USD".to_string()),
         max_depth: depth,
@@ -239,7 +239,7 @@ fn case_scope_widening_rejected() -> Outcome {
     let a = Ed25519Signer::from_seed([2u8; 32]);
     let mut chain = Chain::issue(&human, principal("human:alice"), scope(10_000, 2));
     let widened = Scope {
-        permissions: vec!["payments.charge".to_string(), "payments.refund".to_string()],
+        permissions: vec!["payments.charge".into(), "payments.refund".into()],
         ..scope(10_000, 1)
     };
     let result = chain.attenuate(

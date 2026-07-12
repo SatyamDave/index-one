@@ -576,7 +576,7 @@ mod tests {
 
     fn scope() -> Scope {
         Scope {
-            permissions: vec!["payments.charge".to_string()],
+            permissions: vec!["payments.charge".into()],
             budget: Some(10_000),
             currency: Some("USD".to_string()),
             max_depth: 5,

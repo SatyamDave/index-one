@@ -22,7 +22,7 @@ fn principal(id: &str) -> Principal {
 
 fn scope(depth: u32) -> Scope {
     Scope {
-        permissions: vec!["payments.charge".to_string()],
+        permissions: vec!["payments.charge".into()],
         budget: Some(10_000),
         currency: Some("USD".to_string()),
         max_depth: depth,
