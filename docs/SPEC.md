@@ -222,18 +222,14 @@ serialization with sorted object keys and normalized number/string forms, so
 that two independent implementations produce byte-identical inputs for the same
 logical object.
 
-> **Implementation note.** The current `core/` crates do **not** yet emit RFC
-> 8785 JCS. They serialize with `serde_json::to_vec` over fixed-order tuples of
-> the signed fields, which is deterministic *within this implementation* (field
-> order is fixed by the tuple, not by a canonicalization algorithm) but is not a
-> cross-implementation canonical form. Each affected site
-> (`root_signing_payload` / `delegation_signing_payload` in `core/chain`,
-> `ActionReceipt::canonical_bytes` in `core/witness`, and `signing_payload` in
-> `core/attestation`) carries a `TODO` to migrate to JCS before the encoding is
-> treated as a wire format. **This is a spec/code divergence to reconcile:** the
-> normative target is JCS; the shipped code is deterministic serde_json. Until
-> the migration lands, interoperability across independent encoders is NOT
-> guaranteed.
+> **Implementation note.** JCS is now **implemented**: all three signing/commitment
+> sites — `root_signing_payload` / `delegation_signing_payload` (`core/chain`),
+> `ActionReceipt::canonical_bytes` (`core/witness`), and `signing_payload`
+> (`core/attestation`) — canonicalize with `serde_jcs` (RFC 8785), so independent
+> encoders produce byte-identical inputs. Residual: the opaque `action_digest`
+> (§5.1) is still *caller-defined*; how the caller canonicalizes the underlying
+> action before it becomes `action_digest` is not yet specified normatively and
+> is the remaining canonicalization gap to close.
 
 ### 3.2. Hash function
 
@@ -457,9 +453,12 @@ attester cannot fabricate it.
 ## 7. The `verify()` Algorithm
 
 `core/verifier` composes the layers into a single fail-closed `verify(action,
-root_key, trusted_root)` over a `VerifiableAction { chain, action_receipt,
-completion }`. It returns the effective (narrowest) `Scope` the final hop is
-authorized for, or a typed `VerifyError` naming the exact property that failed.
+root_key, trusted_root, policy)` over a `VerifiableAction { chain,
+action_receipt, completion }`. The `policy` (`VerifyPolicy`) is **verifier-set**,
+not presenter-derived: it names which attester identities count as independent
+(so the presenter cannot pick the weakest bar or pass off a throwaway key). It
+returns the effective (narrowest) `Scope` the final hop is authorized for, or a
+typed `VerifyError` naming the exact property that failed.
 
 The seven conceptual steps (numbered per CLAUDE.md §6; the executor's evaluation
 order is noted where it differs, chosen so a forged-root proof cannot slip
@@ -484,12 +483,21 @@ through against its own private root):
 4. **Verify an inclusion proof against a witnessed root (completeness).** The
    receipt MUST be provably included under the witnessed root via
    `verify_inclusion`. No inclusion proof ⇒ `Omission` — the headline property.
+   `verify_inclusion` rejects a malformed or oversized proof (`leaf_index >=
+   tree_size`, or `path.len() > MAX_PROOF_PATH`) *before* folding, so an
+   attacker-padded proof cannot burn CPU/memory. The receipt carries a
+   per-invocation `nonce`, so two byte-identical actions do not share a leaf.
 
-5. **Verify independent completion (not self-reported) and outcome match.** The
-   completion MUST verify against the executor key (independence + signature),
-   and its `outcome_digest` MUST equal the receipt's `action_digest` — otherwise
-   `Attestation(..)` or `OutcomeMismatch`. The witness records what happened; the
-   attestation must vouch for that same thing.
+5. **Verify independent completion, anchored identity, and digest match.** The
+   completion MUST: (a) verify against the executor key (not self-reported +
+   valid signature); (b) be **anchored to an identity the verifier trusts** for
+   its role — a `ThirdParty` attester's key MUST be in `policy.trusted_attesters`,
+   a `CounterSigned` attester's key MUST be a real delegator in the chain —
+   otherwise `AttesterNotAnchored`; and (c) have both `requested_action_digest`
+   and `outcome_digest` equal the receipt's `action_digest` — otherwise
+   `RequestedActionMismatch` / `OutcomeMismatch`. Part (b) is what makes
+   "independent" mean *a trusted party*, not merely *a key that isn't the
+   executor* (a throwaway key would otherwise attest the executor's own work).
 
 6. **Cross-check the root against the gossip-trusted root (non-equivocation).**
    The `completion.witnessed_root` MUST equal the caller-supplied
