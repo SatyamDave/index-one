@@ -278,6 +278,7 @@ name = "indexone-witness"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "indexone-crypto",
  "serde",
  "serde_jcs",
  "serde_json",

@@ -17,12 +17,15 @@
 //! interior nodes are domain-separated so a leaf can never be reinterpreted as
 //! an interior node. blake3 is the hash.
 //!
-//! Implemented here: append, root, inclusion proof + verification, and RFC 6962
-//! §2.1.2 consistency proofs (a forked/rewritten log cannot prove consistency
-//! against an honest earlier root → non-equivocation).
-//! TODO(witness, @udaya): the gossip transport that distributes signed tree
-//! heads so observers actually compare roots — the other half of §6 #1.
+//! Implemented here: append, root, inclusion proof + verification, RFC 6962
+//! §2.1.2 consistency proofs, and the gossip primitives — signed tree heads
+//! ([`SignedTreeHead`]) plus [`reconcile_heads`], which turns two irreconcilable
+//! heads from the same log into cryptographic proof it equivocated.
+//! TODO(witness, @udaya): the peer-to-peer distribution that actually fans
+//! signed heads out to observers (a networking concern) — the detection crypto
+//! is here; the transport that gossips it is not.
 
+use indexone_crypto::{verify_signature, PublicKey, Signature, Signer};
 use serde::{Deserialize, Serialize};
 
 /// A 32-byte blake3 digest.
@@ -337,6 +340,111 @@ pub fn verify_inclusion(receipt: &ActionReceipt, proof: &InclusionProof, root: &
     acc == *root
 }
 
+// ── Gossip / non-equivocation transport ─────────────────────────────────────
+//
+// Consistency proofs prove a log didn't rewrite its own history. But a
+// malicious log can still *equivocate* — show one history to observer A and a
+// different one to observer B — and neither can tell alone. The fix (CT gossip
+// discipline): the log signs its head, observers exchange those signed heads,
+// and any two heads from the same log must be mutually consistent. Two heads
+// that aren't (same size, different roots; or no valid consistency proof
+// between sizes) are cryptographic proof the log forked.
+
+/// A tree head (size + root) signed by the log operator. Observers gossip these;
+/// two that can't be reconciled are proof of equivocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedTreeHead {
+    pub tree_size: usize,
+    pub root: Digest,
+    pub signature: Signature,
+}
+
+/// Canonical bytes the log signs for a tree head (RFC 8785 JCS).
+fn sth_signing_bytes(tree_size: usize, root: &Digest) -> Vec<u8> {
+    serde_jcs::to_vec(&(tree_size, root)).expect("serializable")
+}
+
+impl Witness {
+    /// Sign the current tree head with the log operator's key, for gossip.
+    pub fn signed_head(&self, signer: &dyn Signer) -> SignedTreeHead {
+        let tree_size = self.entries.len();
+        let root = self.root();
+        let signature = signer
+            .sign(&sth_signing_bytes(tree_size, &root))
+            .expect("sign tree head");
+        SignedTreeHead {
+            tree_size,
+            root,
+            signature,
+        }
+    }
+}
+
+/// Verify a signed tree head against the log operator's public key.
+pub fn verify_signed_head(sth: &SignedTreeHead, log_key: &PublicKey) -> bool {
+    verify_signature(
+        &sth_signing_bytes(sth.tree_size, &sth.root),
+        &sth.signature,
+        log_key,
+    )
+    .unwrap_or(false)
+}
+
+/// Why two signed tree heads could not be reconciled.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EquivocationError {
+    #[error("signed tree head signature invalid")]
+    InvalidSignedHead,
+    #[error("equivocation: tree size {size} was shown two different roots")]
+    ForkedRoot { size: usize },
+    #[error("equivocation: the log is not consistent between sizes {old} and {new}")]
+    Inconsistent { old: usize, new: usize },
+}
+
+/// Reconcile two signed tree heads from the *same* log (both must verify under
+/// `log_key`). Returns `Ok(())` if they are mutually consistent, and an
+/// [`EquivocationError`] — proof the log forked — if not. Heads of equal size
+/// need no proof (their roots must simply match); heads of different sizes need
+/// a [`ConsistencyProof`] that the smaller is a prefix of the larger.
+pub fn reconcile_heads(
+    a: &SignedTreeHead,
+    b: &SignedTreeHead,
+    log_key: &PublicKey,
+    proof: Option<&ConsistencyProof>,
+) -> Result<(), EquivocationError> {
+    if !verify_signed_head(a, log_key) || !verify_signed_head(b, log_key) {
+        return Err(EquivocationError::InvalidSignedHead);
+    }
+    if a.tree_size == b.tree_size {
+        return if a.root == b.root {
+            Ok(())
+        } else {
+            Err(EquivocationError::ForkedRoot { size: a.tree_size })
+        };
+    }
+    let (small, large) = if a.tree_size < b.tree_size {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let inconsistent = || EquivocationError::Inconsistent {
+        old: small.tree_size,
+        new: large.tree_size,
+    };
+    let proof = proof.ok_or_else(inconsistent)?;
+    if verify_consistency(
+        &small.root,
+        &large.root,
+        proof,
+        small.tree_size,
+        large.tree_size,
+    ) {
+        Ok(())
+    } else {
+        Err(inconsistent())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,5 +594,65 @@ mod tests {
         ));
         // Out of range: new_size must equal current length.
         assert!(w.consistency_proof(2, 5).is_none());
+    }
+
+    // Gossip: an honest log's two signed heads (different sizes) reconcile with
+    // a consistency proof — no equivocation.
+    #[test]
+    fn honest_signed_heads_reconcile() {
+        use indexone_crypto::Ed25519Signer;
+        let log = Ed25519Signer::from_seed([77u8; 32]);
+        let mut w = Witness::new();
+        w.append(&receipt(1));
+        w.append(&receipt(2));
+        let head_2 = w.signed_head(&log);
+        w.append(&receipt(3));
+        w.append(&receipt(4));
+        let head_4 = w.signed_head(&log);
+        assert!(verify_signed_head(&head_2, &log.public_key()));
+        let proof = w.consistency_proof(2, 4).unwrap();
+        assert!(reconcile_heads(&head_2, &head_4, &log.public_key(), Some(&proof)).is_ok());
+    }
+
+    // Gossip: two signed heads at the SAME size with DIFFERENT roots are proof
+    // the log equivocated (showed different histories to different observers).
+    #[test]
+    fn forked_root_at_same_size_is_equivocation() {
+        use indexone_crypto::Ed25519Signer;
+        let log = Ed25519Signer::from_seed([77u8; 32]);
+        let mut a = Witness::new();
+        a.append(&receipt(1));
+        a.append(&receipt(2));
+        let head_a = a.signed_head(&log);
+        // A forked view of size 2 that swapped a leaf.
+        let mut b = Witness::new();
+        b.append(&receipt(1));
+        b.append(&receipt(99));
+        let head_b = b.signed_head(&log);
+        assert_eq!(
+            reconcile_heads(&head_a, &head_b, &log.public_key(), None).unwrap_err(),
+            EquivocationError::ForkedRoot { size: 2 }
+        );
+    }
+
+    // A signed head that doesn't verify under the log's key is rejected before
+    // any consistency reasoning.
+    #[test]
+    fn signed_head_from_wrong_key_is_rejected() {
+        use indexone_crypto::Ed25519Signer;
+        let log = Ed25519Signer::from_seed([77u8; 32]);
+        let impostor = Ed25519Signer::from_seed([13u8; 32]);
+        let mut w = Witness::new();
+        w.append(&receipt(1));
+        let head = w.signed_head(&log);
+        assert!(!verify_signed_head(&head, &impostor.public_key()));
+        let head2 = {
+            w.append(&receipt(2));
+            w.signed_head(&log)
+        };
+        assert_eq!(
+            reconcile_heads(&head, &head2, &impostor.public_key(), None).unwrap_err(),
+            EquivocationError::InvalidSignedHead
+        );
     }
 }

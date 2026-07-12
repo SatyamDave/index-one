@@ -239,15 +239,24 @@ impl<C: Clock> RevocationChecker for ShortTtlChecker<C> {
 /// fetch is a documented TODO — a checker configured with a remote source it
 /// hasn't synced fails closed with [`RevocationError::LogUnreachable`] rather
 /// than silently reporting "live".
+/// A source of published transparency-log revocations — an HTTP fetch, a
+/// signed log segment, a local mirror. Injected so the remote path is real and
+/// testable without a network (mirrors how the runtime crypto is injected at
+/// the edges). `Err` means "couldn't reach the log" — the caller fails closed —
+/// distinct from `Ok(empty)` meaning "reached it, nothing revoked".
+pub trait LogTransport {
+    fn fetch(&self) -> Result<Vec<TransparencyLogEntry>, String>;
+}
+
 pub struct TransparencyLogChecker {
     entries: HashMap<RevocationId, TransparencyLogEntry>,
-    /// Remote log source. `None` for a purely in-memory log. `Some(url)` marks
-    /// a log whose contents must be fetched from `url` before use — a fetch
-    /// path that is **not yet implemented**, so lookups fail closed.
-    ///
-    /// TODO(revocation): implement the signed-log-segment fetch + inclusion /
-    /// non-inclusion proof over `log_url`, populating `entries` from it, so a
-    /// remote log becomes as usable as the in-memory one.
+    /// A pluggable remote source. `Some` → each lookup fetches through it (fail
+    /// closed on a fetch error); `None` → the in-memory `entries` are authoritative.
+    transport: Option<Box<dyn LogTransport>>,
+    /// A remote URL with **no** wired transport — a checker configured this way
+    /// fails closed (`LogUnreachable`) rather than silently reporting "live".
+    /// TODO(revocation): a concrete HTTP `LogTransport` + inclusion /
+    /// non-inclusion proofs over the fetched signed segment.
     log_url: Option<String>,
 }
 
@@ -257,17 +266,29 @@ impl TransparencyLogChecker {
     pub fn in_memory() -> TransparencyLogChecker {
         TransparencyLogChecker {
             entries: HashMap::new(),
+            transport: None,
             log_url: None,
         }
     }
 
-    /// A checker pointed at a remote log at `url` whose fetch is not yet
-    /// implemented. Every lookup fails closed with
-    /// [`RevocationError::LogUnreachable`]. Placeholder until the TODO on
-    /// `log_url` lands.
+    /// A checker backed by an injected [`LogTransport`] — the real remote path.
+    /// Each lookup fetches the published revocations through `transport` and
+    /// fails closed if the fetch errors.
+    pub fn with_transport(transport: Box<dyn LogTransport>) -> TransparencyLogChecker {
+        TransparencyLogChecker {
+            entries: HashMap::new(),
+            transport: Some(transport),
+            log_url: None,
+        }
+    }
+
+    /// A checker naming a remote log at `url` but with no wired transport yet.
+    /// Every lookup fails closed with [`RevocationError::LogUnreachable`] — use
+    /// [`with_transport`](Self::with_transport) to make it real.
     pub fn remote(url: impl Into<String>) -> TransparencyLogChecker {
         TransparencyLogChecker {
             entries: HashMap::new(),
+            transport: None,
             log_url: Some(url.into()),
         }
     }
@@ -282,9 +303,18 @@ impl TransparencyLogChecker {
 
 impl RevocationChecker for TransparencyLogChecker {
     fn is_revoked(&self, id: &RevocationId) -> Result<RevocationStatus, RevocationError> {
+        if let Some(transport) = &self.transport {
+            let fetched = transport.fetch().map_err(RevocationError::LogUnreachable)?;
+            return match fetched.into_iter().find(|e| &e.revoked == id) {
+                Some(entry) => Ok(RevocationStatus::Revoked {
+                    reason: entry.reason,
+                }),
+                None => Ok(RevocationStatus::Live),
+            };
+        }
         if let Some(url) = &self.log_url {
             return Err(RevocationError::LogUnreachable(format!(
-                "remote log fetch not implemented for {url}"
+                "no transport wired for remote log {url}"
             )));
         }
         match self.entries.get(id) {
@@ -653,6 +683,45 @@ mod tests {
         // surfaces (fail closed).
         assert!(matches!(
             composite.is_revoked(&live),
+            Err(RevocationError::LogUnreachable(_))
+        ));
+    }
+
+    /// An injected transport makes the remote path real: a revocation published
+    /// through it is found, and a fetch error fails closed (LogUnreachable),
+    /// distinct from "reached the log, nothing revoked".
+    #[test]
+    fn transport_backed_checker_is_real_and_fails_closed() {
+        struct OkTransport(Vec<TransparencyLogEntry>);
+        impl LogTransport for OkTransport {
+            fn fetch(&self) -> Result<Vec<TransparencyLogEntry>, String> {
+                Ok(self.0.clone())
+            }
+        }
+        struct DownTransport;
+        impl LogTransport for DownTransport {
+            fn fetch(&self) -> Result<Vec<TransparencyLogEntry>, String> {
+                Err("connection refused".to_string())
+            }
+        }
+
+        let revoked = RevocationId::from_signature(&sig(2));
+        let live = RevocationId::from_signature(&sig(5));
+
+        let reachable =
+            TransparencyLogChecker::with_transport(Box::new(OkTransport(vec![log_entry(
+                revoked.clone(),
+                "leaked over the wire",
+            )])));
+        assert!(matches!(
+            reachable.is_revoked(&revoked).unwrap(),
+            RevocationStatus::Revoked { .. }
+        ));
+        assert_eq!(reachable.is_revoked(&live).unwrap(), RevocationStatus::Live);
+
+        let down = TransparencyLogChecker::with_transport(Box::new(DownTransport));
+        assert!(matches!(
+            down.is_revoked(&revoked),
             Err(RevocationError::LogUnreachable(_))
         ));
     }
