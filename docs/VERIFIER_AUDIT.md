@@ -40,9 +40,16 @@ CLAUDE.md §6 step 3 promises the action digest is bound to the declared purpose
 chain; the code only bound the chain. `requested_action_digest` was signed but
 read nowhere in `verify()`. **Fix:** step 3 now requires
 `completion.requested_action_digest == action_receipt.action_digest` (the attested
-request must equal the logged action). Full purpose↔digest binding — defining
-`action_digest` as a domain-separated digest over `(purpose, params)` — is spec'd
-as the next step (still opaque/caller-defined today; documented, not silent).
+request must equal the logged action). **Full purpose↔digest binding is now
+built:** `indexone_witness::bind_action(purpose, params_digest)` defines
+`action_digest` as a domain-separated `blake3(DOMAIN ‖ len(purpose) ‖ purpose ‖
+params_digest)`, and `indexone_verifier::verify_action_purpose_binding` /
+`verify_with_purpose` require the witnessed digest to equal the binding for the
+**final hop's** purpose and the declared params. An action witnessed under a
+different purpose (or params) now fails closed with `VerifyError::PurposeMismatch`
+— the `action_bound_to_a_different_purpose_is_rejected` test shows base `verify()`
+accepting the opaque digest while the binding gate rejects it. Honest scope
+(CLAUDE.md §4): binds the digest to the *declared* purpose, not to ground truth.
 
 ## 3 — MEDIUM: presenter-controlled sufficiency
 

@@ -183,6 +183,17 @@ def chain_digest(chain: dict[str, Any]) -> str:
     return _invoke({"cmd": "chain_digest", "chain": chain})["digest"]
 
 
+def bind_action(purpose: str, params_digest_hex: str) -> str:
+    """The purpose-bound action digest (hex) for ``(purpose, params_digest)``.
+    Use it as the ``action_digest`` you witness so the action commits to the
+    delegated purpose, then enforce it with ``composed_verify(..., params_digest=)``
+    — closes the opaque-digest gap (VERIFIER_AUDIT #2).
+    """
+    return _invoke({"cmd": "bind_action", "purpose": purpose, "params_digest": params_digest_hex})[
+        "digest"
+    ]
+
+
 def witness_append(
     chain_digest_hex: str,
     action_digest_hex: str,
@@ -248,28 +259,31 @@ def composed_verify(
     *,
     trusted_attesters: list[dict[str, Any]] | None = None,
     allow_counter_signed: bool = False,
+    params_digest_hex: str | None = None,
 ) -> Scope:
     """The full CLAUDE.md §6 ``verify()``: chain signatures + attenuation, witness
     completeness (**omission**), independent completion attestation, and
-    non-equivocation — fail closed. Returns the effective scope, or raises
-    :class:`IndexOneError` naming the unresolved step (e.g. omission, not
-    independently attested, attester not anchored).
+    non-equivocation — fail closed. Pass ``params_digest_hex`` to also enforce the
+    purpose↔digest binding (the action must be ``bind_action(final-hop purpose,
+    params)``). Returns the effective scope, or raises :class:`IndexOneError`
+    naming the unresolved step (omission, not independently attested, purpose
+    mismatch, ...).
     """
-    resp = _invoke(
-        {
-            "cmd": "composed_verify",
-            "chain": chain,
-            "root_key": root_key,
-            "trusted_root": trusted_root_hex,
-            "action_receipt": action_receipt,
-            "completion": completion,
-            "policy": {
-                "trusted_attesters": trusted_attesters or [],
-                "allow_counter_signed": allow_counter_signed,
-            },
-        }
-    )
-    return _scope_from(resp["effective_scope"])
+    request: dict[str, Any] = {
+        "cmd": "composed_verify",
+        "chain": chain,
+        "root_key": root_key,
+        "trusted_root": trusted_root_hex,
+        "action_receipt": action_receipt,
+        "completion": completion,
+        "policy": {
+            "trusted_attesters": trusted_attesters or [],
+            "allow_counter_signed": allow_counter_signed,
+        },
+    }
+    if params_digest_hex is not None:
+        request["params_digest"] = params_digest_hex
+    return _scope_from(_invoke(request)["effective_scope"])
 
 
 class Client:

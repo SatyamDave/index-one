@@ -47,7 +47,7 @@ Verbatim, quotable stances (primary source):
 |---|---|---|---|---|---|---|
 | **(b)** | **Omission** — an action absent from the record | completeness | **Implication** of AIP's signature-only model (not a verbatim admitted non-goal) | **Real AIP SDK** (`agent-identity-protocol==0.3.0`) + IndexOne stand-in | `exploits/real_aip/sidebyside.py` · `omission_3hop` · verifier test · conformance | `VerifyError::Omission` |
 | **(c)** | **Dishonest self-reported completion** | completion honesty | **AIP verbatim non-goal** (safest headline caveat) | **Real AIP SDK** + stand-in | `real_aip/sidebyside.py` · `omission_3hop` · verifier test · conformance | `VerifyError::Attestation(NotIndependent)` |
-| **(a)** | **In-scope action, different declared purpose** | purpose↔action binding | claimed-ish (attenuation covers scope, not purpose) | IndexOne verifier only | verifier test `requested_action_differs_from_witnessed_is_rejected` | `VerifyError::ActionDigestInconsistent` |
+| **(a)** | **In-scope action, different declared purpose** | purpose↔action binding | claimed (via `bind_action`) | IndexOne verifier only | verifier tests `action_bound_to_a_different_purpose_is_rejected` (+ `requested_action_differs_from_witnessed_is_rejected`) | `VerifyError::PurposeMismatch` |
 | **eq** | **Log equivocation / fork** | non-equivocation | claimed by any log-anchored draft (DRP names it) | modeled | `witness::reconcile_heads` tests · conformance | `EquivocationError` / `VerifyError::Equivocation` |
 | **sock** | **Sockpuppet / Sybil attester** | independent attestation | IndexOne's own claim (audit Finding 1) | IndexOne verifier only | verifier test `sockpuppet_key_attestation_is_rejected` | `VerifyError::AttesterNotAnchored` |
 | **attr** | **Cross-org attribution (forged hop)** | authority provenance | **AP2 single-hop non-goal** — *supporting demo, not headline* | **Faithful SD-JWT-VC reimpl** (not Google's SDK) + real Ed25519 chain | `exploits/real_ap2/sidebyside.py` · `ap2_attribution` | chain does not trace to trusted root → INVALID |
@@ -64,7 +64,7 @@ Verbatim, quotable stances (primary source):
 2. **Same scenario, native token formats — not identical bytes.** AIP and IndexOne encode the same 3-hop delegation each in its own format.
 3. **Omission-vs-AIP is an implication** of AIP's model; only **self-report** is AIP's *verbatim admitted* non-goal. Frame each accordingly.
 4. **AP2 supports delegation chains** (v0.2, SD-JWT `cnf`) — do **not** claim otherwise. The AP2 demo attacks the single-hop *non-goal* (mandate verification is blind to cross-org provenance) and is a supporting demo, per Directive 2.
-5. **Attack (a) rests on an opaque, caller-defined `action_digest` today** (`VERIFIER_AUDIT.md` Finding 2). It proves "requested digest ≠ witnessed digest," a *proxy* for "different declared purpose," not the property itself. Label it "supporting, pending purpose↔digest binding" until `action_digest = H(purpose, params)` lands.
+5. **Attack (a) is now a real purpose binding** (`VERIFIER_AUDIT.md` Finding 2, resolved). `action_digest = bind_action(purpose, params)` and `verify_with_purpose` reject an action witnessed under a purpose different from the final hop's — `VerifyError::PurposeMismatch`. Still honest scope (CLAUDE.md §4): binds to the *declared* purpose, not ground truth. Remaining polish: promote it into the `omission_3hop` flag-plant binary + conformance (below).
 6. **A witness anchors what was reported, not ground truth** (CLAUDE.md §4). The strength of any attestation is exactly the attester's visibility.
 7. **Any benchmark / "sub-ms / 100%-rejection / N-byte" figure is self-reported** unless re-run from a committed script (§16).
 
@@ -75,5 +75,5 @@ Verbatim, quotable stances (primary source):
 - [x] Install + **hash-pin** the real AIP SDK — `exploits/real_aip/requirements.lock.txt` (`pip-compile --generate-hashes`, all-platform hashes); a CI job (`.github/workflows/attack-artifact.yml`) that **fails** if the upstream can't run or IndexOne doesn't reject (`sidebyside.py --require-real` turns the local soft-skip into a hard check). Confirmed live: real `ChainedToken.authorize` → VALID, composed `verify()` → Omission / NotIndependent.
 - [ ] Commit **golden vectors**: the exact upstream token (or bytes + SHA-256) and IndexOne artifact + expected verdicts, so a reviewer reproduces byte-for-byte.
 - [ ] Import **APS's shipped conformance fixtures** → a second real upstream beyond AIP.
-- [ ] Promote **(a)** into `omission_3hop` + conformance once purpose↔digest binding lands.
+- [~] Purpose↔digest binding **built** (`bind_action` + `verify_with_purpose`, `VerifyError::PurposeMismatch`); still to do — promote **(a)** into the `omission_3hop` flag-plant binary + conformance suite (verifier-tested today).
 - [ ] One-command reproduce (`make reproduce`) + quarantine the `FAKE-SIG` placeholder in `integrations/attack/harness.py`.

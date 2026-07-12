@@ -29,7 +29,7 @@ use indexone_chain::{Chain, ChainError, Scope};
 use indexone_crypto::PublicKey;
 use indexone_revlog::{verify_not_revoked, LogBackedProof};
 use indexone_revocation::{revocation_ids_for_chain, RevocationId};
-use indexone_witness::{verify_inclusion, ActionReceipt, Digest};
+use indexone_witness::{bind_action, verify_inclusion, ActionReceipt, Digest};
 
 /// Verifier-set policy for how strong an attestation must be — the piece that
 /// makes "independent attestation" actually mean something (audit Findings 1
@@ -165,6 +165,13 @@ pub enum VerifyError {
     /// [`VerifyError::Omission`].
     #[error("revoked: a chain hop is not provably unrevoked against the logged revocation map")]
     Revoked,
+    /// The witnessed action digest is not the purpose-bound digest for the
+    /// purpose the final hop was delegated for and the declared params — i.e. the
+    /// action was not provably bound to the delegated purpose (VERIFIER_AUDIT #2).
+    /// Closes CLAUDE.md §9 case (a): an in-scope action for a *different* declared
+    /// purpose no longer slips through with an opaque digest.
+    #[error("purpose mismatch: the witnessed action is not bound to the delegated purpose")]
+    PurposeMismatch,
 }
 
 /// Verify a cross-org action against a trusted root key and a gossip-trusted
@@ -391,6 +398,52 @@ pub fn verify_threshold_with_revocation(
 ) -> Result<Scope, VerifyError> {
     verify_chain_not_revoked(&action.chain, revocation)?;
     verify_threshold(action, root_key, trusted_root, required_threshold, policy)
+}
+
+// ── Step 3+: purpose <-> action-digest binding ──────────────────────────────
+//
+// The base `verify()` binds the action to the *chain* and requires the attested
+// request to equal the witnessed digest, but `action_digest` itself was an opaque
+// caller value (VERIFIER_AUDIT #2). This gate makes it purpose-bound: the
+// witnessed digest must be `bind_action(final-hop purpose, params)`, so an action
+// witnessed under a purpose *different* from what the executor was delegated for
+// (or with different params) yields a different digest and fails closed. Additive,
+// so it doesn't disturb `verify()`'s body.
+
+/// Verify the witnessed `action_digest` is the purpose-bound digest for the
+/// purpose the **final delegation hop** carries and the declared `params_digest`.
+/// A root-only chain (no delegated purpose) fails closed.
+///
+/// Honest scope (CLAUDE.md §4): this binds the digest to the *declared* purpose +
+/// params, not to ground truth about what physically happened.
+pub fn verify_action_purpose_binding(
+    action: &VerifiableAction,
+    params_digest: &Digest,
+) -> Result<(), VerifyError> {
+    let purpose = action
+        .chain
+        .delegations
+        .last()
+        .map(|hop| hop.purpose.as_str())
+        .ok_or(VerifyError::PurposeMismatch)?;
+    if bind_action(purpose, params_digest) != action.action_receipt.action_digest {
+        return Err(VerifyError::PurposeMismatch);
+    }
+    Ok(())
+}
+
+/// [`verify`] preceded by the purpose-binding gate: proves the witnessed action
+/// commits to the delegated purpose before running the completeness/attestation
+/// checks.
+pub fn verify_with_purpose(
+    action: &VerifiableAction,
+    root_key: &PublicKey,
+    trusted_root: &Digest,
+    policy: &VerifyPolicy,
+    params_digest: &Digest,
+) -> Result<Scope, VerifyError> {
+    verify_action_purpose_binding(action, params_digest)?;
+    verify(action, root_key, trusted_root, policy)
 }
 
 #[cfg(test)]
@@ -1030,6 +1083,102 @@ mod tests {
         assert_eq!(
             verify_with_revocation(&va, &world.root_key, &root, &policy, &ev).unwrap_err(),
             VerifyError::Revoked
+        );
+    }
+
+    // ── Step 3+: purpose <-> action-digest binding ──────────────────────────
+
+    /// An action whose digest is bound to the purpose the final hop was actually
+    /// delegated for ("settle fare") passes the purpose-binding gate.
+    #[test]
+    fn purpose_bound_action_verifies() {
+        let world = build_chain();
+        let params = [7u8; 32];
+        let action = bind_action("settle fare", &params); // the final hop's purpose
+        let (receipt, proof, root) = record(&world.chain, action);
+        let completion = CompletionAttestation::attest(
+            &world.notary,
+            principal("attester:notary"),
+            world.chain.digest(),
+            action,
+            action,
+            root,
+            proof,
+        );
+        let policy = trusting(&world);
+        let va = VerifiableAction {
+            chain: world.chain.clone(),
+            action_receipt: receipt,
+            completion,
+        };
+        let effective = verify_with_purpose(&va, &world.root_key, &root, &policy, &params).unwrap();
+        assert_eq!(effective.budget, Some(4_000));
+    }
+
+    /// Day-12 case (a), done properly: the executor was delegated "settle fare"
+    /// but witnessed an action digest bound to a *different* purpose. Fully
+    /// signed, witnessed, and independently attested — base `verify()` accepts it
+    /// (the digest was opaque), but the purpose-binding gate catches it.
+    #[test]
+    fn action_bound_to_a_different_purpose_is_rejected() {
+        let world = build_chain();
+        let params = [7u8; 32];
+        let wrong = bind_action("wire funds offshore", &params); // not the delegated purpose
+        let (receipt, proof, root) = record(&world.chain, wrong);
+        let completion = CompletionAttestation::attest(
+            &world.notary,
+            principal("attester:notary"),
+            world.chain.digest(),
+            wrong,
+            wrong,
+            root,
+            proof,
+        );
+        let policy = trusting(&world);
+        let va = VerifiableAction {
+            chain: world.chain.clone(),
+            action_receipt: receipt,
+            completion,
+        };
+        // Base verify() passes — action_digest is opaque to it.
+        assert!(verify(&va, &world.root_key, &root, &policy).is_ok());
+        // The purpose-binding gate rejects it.
+        assert_eq!(
+            verify_with_purpose(&va, &world.root_key, &root, &policy, &params).unwrap_err(),
+            VerifyError::PurposeMismatch
+        );
+    }
+
+    /// Fail closed: a root-only chain has no delegated purpose to bind to.
+    #[test]
+    fn root_only_chain_has_no_purpose_binding() {
+        let world = build_chain();
+        let params = [7u8; 32];
+        let action = bind_action("anything", &params);
+        let (receipt, proof, root) = record(&world.chain, action);
+        let completion = CompletionAttestation::attest(
+            &world.notary,
+            principal("attester:notary"),
+            world.chain.digest(),
+            action,
+            action,
+            root,
+            proof,
+        );
+        // Swap in a root-only chain (no delegations) for the binding check.
+        let root_only = Chain::issue(
+            &Ed25519Signer::from_seed([1u8; 32]),
+            principal("human:alice"),
+            scope(10_000, 0),
+        );
+        let va = VerifiableAction {
+            chain: root_only,
+            action_receipt: receipt,
+            completion,
+        };
+        assert_eq!(
+            verify_action_purpose_binding(&va, &params).unwrap_err(),
+            VerifyError::PurposeMismatch
         );
     }
 }
