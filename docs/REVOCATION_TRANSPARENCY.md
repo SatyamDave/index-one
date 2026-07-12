@@ -43,13 +43,17 @@ The transport (fetching the snapshot over the network) is injected via the
 `SnapshotSource` trait, so `core/revocation` stays synchronous and dependency-light;
 the concrete HTTP source lives in a separate crate.
 
-## v2 (documented destination, not built)
+## v2 — sparse Merkle map (built) + log-backing (next)
 
 When the threat model demands defending against a *misbehaving* operator
 per-request (not just an unreliable one), the upgrade is a **log-backed sparse
-Merkle map**. Two composable pieces, both grounded in the survey below:
+Merkle map**. Two composable pieces, both grounded in the survey below.
+**Piece (a) is now built** in `core/revmap`; piece (b) is the remaining step.
 
-**(a) Sparse Merkle map keyed by the 32-byte `RevocationId`.** blake3 already
+**(a) Sparse Merkle map keyed by the 32-byte `RevocationId`** — *implemented in
+`core/revmap` (`RevocationMap`, `verify_non_inclusion`): blake3-only, no C deps,
+8 adversarial tests incl. forged-proof cross-over and malformed-proof
+fail-closed.* blake3 already
 gives a uniform 256-bit path, so the id *is* the root-to-leaf direction vector
 over a notional 2²⁵⁶-leaf tree. A revoked key's leaf holds a present-value; every
 other leaf holds the empty-leaf constant. A **non-revocation proof** is an audit
@@ -59,12 +63,18 @@ the default-subtree trick — one precomputed empty-hash per level, `Dᵢ =
 H(Dᵢ₋₁‖Dᵢ₋₁)` — so only the ~`log₂ n` non-default siblings plus a level bitmap
 travel in the proof: **~0.5–0.8 KB** for 10⁴–10⁶ entries (vs. 8 KB uncompressed).
 
-*Reuse, don't hand-roll (no-bloat).* The survey found three maintained crates
-with native non-inclusion proofs; the pick is **`sparse-merkle-tree`
-(nervosnetwork/jjyr)** — pluggable `Hasher` (drop in blake3), `no_std`, MIT,
-already forked into Namada — with **`jmt`** (Penumbra; versioned roots, Apache-2.0)
-and **`monotree`** (blake3-default, MIT) as fallbacks. `ct-merkle`/`rs_merkle`
-are the wrong tool (append-only/plain trees, no absence proofs).
+*Reuse evaluated, then built (no-bloat).* The survey shortlisted three maintained
+crates with native non-inclusion proofs — `sparse-merkle-tree` (nervosnetwork/jjyr),
+`jmt` (Penumbra), `monotree`. We probed the top pick: its non-inclusion/forged-proof
+API is exactly right and Namada-hardened, **but `blake2b-rs` is a non-optional
+dependency** (not feature-gated), so reusing it forces a C-compiled blake2b lib
+into our deliberately lean, blake3-only, C-dep-free core even though we never call
+it. One-line reason to build instead: *the only suitable crate hard-depends on a
+C hasher that violates the core's blake3-only / audit-minimal invariant, and this
+is load-bearing crypto we must own per the Day-12 gate.* `core/revmap` is ~1 file,
+depends only on blake3 + serde, and passes the same adversarial forged-proof test
+the crate does. (`ct-merkle`/`rs_merkle` were the wrong tool regardless —
+append-only/plain trees, no absence proofs.)
 
 **(b) Log-back it (Trillian VLDM pattern).** A bare signed map has no native
 append-only check, so it can silently **equivocate** (different root to different

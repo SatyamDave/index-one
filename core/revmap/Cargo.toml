@@ -1,0 +1,16 @@
+[package]
+name = "indexone-revmap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Sparse Merkle map over 256-bit keys with compact non-inclusion proofs — the v2 revocation structure. Proves a key is NOT in the revoked set (offline, against a signed root), the one thing an append-only log can't. blake3-only, no C deps."
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+
+[lib]
+name = "indexone_revmap"
+path = "src/lib.rs"
