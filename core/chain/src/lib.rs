@@ -171,10 +171,10 @@ impl From<indexone_crypto::CryptoError> for ChainError {
 }
 
 /// Canonical bytes a `RootBlock`'s signature covers (everything but the
-/// signature). TODO(crypto): move to RFC 8785 JCS before this is a wire format;
-/// serde_json field order is deterministic here, which is enough for now.
+/// signature), in RFC 8785 (JCS) form — so an independent encoder recomputes the
+/// same bytes and the signature verifies cross-implementation.
 fn root_signing_payload(principal: &Principal, key: &PublicKey, scope: &Scope) -> Vec<u8> {
-    serde_json::to_vec(&(principal, key, scope)).expect("serializable")
+    serde_jcs::to_vec(&(principal, key, scope)).expect("serializable")
 }
 
 /// Canonical bytes a `DelegationBlock`'s signature covers (everything but the
@@ -189,7 +189,7 @@ fn delegation_signing_payload(
     purpose: &str,
     prev_block_hash: &[u8],
 ) -> Vec<u8> {
-    serde_json::to_vec(&(from, from_key, to, to_key, scope, purpose, prev_block_hash))
+    serde_jcs::to_vec(&(from, from_key, to, to_key, scope, purpose, prev_block_hash))
         .expect("serializable")
 }
 
@@ -200,11 +200,11 @@ fn hash_bytes(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn root_hash(root: &RootBlock) -> Vec<u8> {
-    hash_bytes(&serde_json::to_vec(root).expect("serializable"))
+    hash_bytes(&serde_jcs::to_vec(root).expect("serializable"))
 }
 
 fn delegation_hash(block: &DelegationBlock) -> Vec<u8> {
-    hash_bytes(&serde_json::to_vec(block).expect("serializable"))
+    hash_bytes(&serde_jcs::to_vec(block).expect("serializable"))
 }
 
 impl Chain {
@@ -388,7 +388,7 @@ impl Chain {
     /// for "the authority this action ran under", committed to by witness
     /// receipts and completion attestations.
     pub fn digest(&self) -> [u8; 32] {
-        *blake3::hash(&serde_json::to_vec(self).expect("serializable")).as_bytes()
+        *blake3::hash(&serde_jcs::to_vec(self).expect("serializable")).as_bytes()
     }
 
     /// The public key of the agent at the end of the chain — the party that
@@ -558,6 +558,20 @@ mod tests {
         assert_eq!(
             chain.verify(&attacker.public_key()).unwrap_err(),
             ChainError::RootKeyMismatch
+        );
+    }
+
+    // Claim: RFC 8785 (JCS) canonicalization is key-order-independent — two
+    // structurally-equal values with different key insertion order produce
+    // identical bytes. This is what lets an independent encoder recompute the
+    // exact bytes a signature was made over.
+    #[test]
+    fn canonicalization_is_key_order_independent() {
+        let a = serde_json::json!({"b": 1, "a": {"y": 2, "x": 3}});
+        let b = serde_json::json!({"a": {"x": 3, "y": 2}, "b": 1});
+        assert_eq!(
+            serde_jcs::to_vec(&a).unwrap(),
+            serde_jcs::to_vec(&b).unwrap()
         );
     }
 }

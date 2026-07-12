@@ -19,6 +19,7 @@ members = [
     "witness",
     "attestation",
     "verifier",
+    "cli",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ publish = false           # not ready to publish to crates.io yet
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_jcs = "0.2"
 thiserror = "1"
 blake3 = "1"
 ed25519-dalek = "2"

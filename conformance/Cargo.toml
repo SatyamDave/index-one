@@ -1,0 +1,19 @@
+[package]
+name = "indexone-conformance"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Cross-draft adversarial conformance suite: encodes each competing draft's claimed guarantees vs. admitted non-goals (verified in RESEARCH_VERIFICATION.md) as executable cases and asserts the IndexOne verifier rejects what it should."
+
+# Standalone package (like /exploits, /benchmarks), NOT a member of the /core
+# workspace. Integrates the real core crates via path deps.
+[dependencies]
+indexone-crypto = { path = "../core/crypto" }
+indexone-chain = { path = "../core/chain" }
+indexone-witness = { path = "../core/witness" }
+indexone-attestation = { path = "../core/attestation" }
+indexone-verifier = { path = "../core/verifier" }
+
+[[bin]]
+name = "conformance"
+path = "src/main.rs"

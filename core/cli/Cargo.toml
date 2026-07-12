@@ -1,0 +1,19 @@
+[package]
+name = "indexone-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "indexone-cli: a thin JSON-over-stdio sidecar exposing issue/attenuate/verify from the IndexOne core, so non-Rust SDKs bind to the real crypto instead of reimplementing it."
+
+[[bin]]
+name = "indexone-cli"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+indexone-crypto = { workspace = true }
+indexone-chain = { workspace = true }

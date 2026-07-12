@@ -5,12 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Signature-scheme abstraction for index-one capability tokens (Ed25519 today, ML-DSA/hybrid later)."
+description = "Signature-scheme abstraction for index-one capability tokens: Ed25519, ML-DSA-87 (FIPS-204), and hybrid classical+PQ (both must verify)."
 
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
-ed25519-dalek = { workspace = true }
-getrandom = { workspace = true }
+# Classical signatures: mature, widely-audited pure-Rust Ed25519 (RFC 8032).
+ed25519-dalek = "2"
+# Post-quantum signatures: FIPS-204 ML-DSA, pure Rust (integritychain/fips204).
+fips204 = "0.4"
+# CSPRNG seed for Ed25519 key generation (matches the getrandom pulled in
+# transitively by ed25519-dalek / fips204, so the lockfile stays single-version).
+getrandom = "0.2"
 
 [dev-dependencies]
+serde_json = "1"
