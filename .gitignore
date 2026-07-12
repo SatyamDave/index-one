@@ -31,3 +31,9 @@ dist/
 .env
 .env.*
 !.env.example
+
+# cargo-fuzz: build output, generated corpus, crash artifacts, coverage
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/

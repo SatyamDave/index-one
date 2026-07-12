@@ -68,3 +68,17 @@ jobs:
       - run: cargo fmt --manifest-path services/witness/Cargo.toml --all --check
       - run: cargo clippy --manifest-path services/witness/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path services/witness/Cargo.toml
+
+  fuzz-build:
+    # Build the cargo-fuzz targets so they can't rot as the core evolves. The
+    # deep fuzzing campaign runs on demand / on a schedule, not on every PR.
+    name: fuzz targets build (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo +nightly fuzz build --fuzz-dir fuzz

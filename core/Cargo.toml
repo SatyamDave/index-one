@@ -27,7 +27,7 @@ members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-license = "TODO"          # TODO: confirm MIT vs Apache-2.0, see /LICENSE
+license = "Apache-2.0"
 repository = "https://github.com/SatyamDave/index-one"
 publish = false           # not ready to publish to crates.io yet
 
@@ -40,6 +40,9 @@ blake3 = "1"
 ed25519-dalek = "2"
 getrandom = "0.2"
 hex = "0.4"
+# Property-based (fuzz-style) testing: adversarial-input generation to prove the
+# fail-closed / soundness invariants, not just example cases. Dev-only.
+proptest = "1"
 
 # Internal crates (referenced by path so downstream crates share versions).
 indexone-crypto = { path = "crypto" }
