@@ -3,15 +3,15 @@ name = "indexone-benchmarks"
 version = "0.0.1"
 edition = "2021"
 publish = false
-description = "Verification-latency and per-hop-size benchmarks for index-one. Currently benchmark placeholder logic only -- see benches/*.rs TODOs."
+description = "Real benchmarks for IndexOne: Chain::verify and composed verify()/verify_threshold latency, per-hop wire size, and witness log operations (append, inclusion/consistency proofs, signed tree heads)."
 
 [dependencies]
-# Path deps into /core, ready to wire real benches to once implemented.
+# Path deps into /core.
 indexone-chain = { path = "../core/chain" }
 indexone-crypto = { path = "../core/crypto" }
-indexone-verifier = { path = "../core/verifier" }
 indexone-witness = { path = "../core/witness" }
 indexone-attestation = { path = "../core/attestation" }
+indexone-verifier = { path = "../core/verifier" }
 serde_json = "1"
 
 [dev-dependencies]
@@ -27,4 +27,8 @@ harness = false
 
 [[bench]]
 name = "composed_verify"
+harness = false
+
+[[bench]]
+name = "witness_ops"
 harness = false
