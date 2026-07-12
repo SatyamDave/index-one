@@ -1,0 +1,19 @@
+[package]
+name = "indexone-revlog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Log-backed revocation map (v2 part b): commits each epoch's sparse-Merkle map root as a leaf in the RFC 6962 witness, binding the root a client verifies against into the append-only log so map equivocation and rollback become detectable."
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+indexone-crypto.workspace = true
+indexone-witness.workspace = true
+indexone-revmap = { path = "../revmap" }
+
+[lib]
+name = "indexone_revlog"
+path = "src/lib.rs"

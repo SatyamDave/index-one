@@ -17,6 +17,7 @@ members = [
     "chain",
     "revocation",
     "revmap",
+    "revlog",
     "witness",
     "attestation",
     "verifier",
