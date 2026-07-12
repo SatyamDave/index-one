@@ -18,6 +18,8 @@
 //! all return a typed error, never a silent success. TLS is intentionally not
 //! handled here (terminate at a proxy).
 
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -42,17 +44,91 @@ pub struct AppState {
     witness: Arc<Mutex<Witness>>,
     log_signer: Arc<Ed25519Signer>,
     log_key: PublicKey,
+    /// Durable append-only backing store. `Some` ⇒ every appended receipt is
+    /// persisted (and flushed) before it is acked, and the whole log is rebuilt
+    /// from disk on restart; `None` ⇒ in-memory only (tests, ephemeral runs).
+    store: Option<Arc<Mutex<Store>>>,
 }
 
 impl AppState {
-    /// A fresh, empty log operated by `log_signer`.
+    /// A fresh, empty **in-memory** log operated by `log_signer` (no persistence
+    /// — a restart starts from an empty tree).
     pub fn new(log_signer: Ed25519Signer) -> Self {
         let log_key = log_signer.public_key();
         AppState {
             witness: Arc::new(Mutex::new(Witness::new())),
             log_signer: Arc::new(log_signer),
             log_key,
+            store: None,
         }
+    }
+
+    /// A **durable** log backed by the append-only file at `path`. Existing
+    /// entries are replayed into the tree on open — so the root and every
+    /// inclusion proof survive a restart — and each new receipt is persisted
+    /// before it is acked. A missing file starts an empty log.
+    pub fn with_persistence(log_signer: Ed25519Signer, path: impl AsRef<Path>) -> io::Result<Self> {
+        let log_key = log_signer.public_key();
+        let mut witness = Witness::new();
+        let store = Store::open(path.as_ref(), &mut witness)?;
+        Ok(AppState {
+            witness: Arc::new(Mutex::new(witness)),
+            log_signer: Arc::new(log_signer),
+            log_key,
+            store: Some(Arc::new(Mutex::new(store))),
+        })
+    }
+}
+
+/// Durable append-only storage for the witness log: a sequence of
+/// length-prefixed (`u32` little-endian) canonical `ActionReceipt` frames. The
+/// Merkle tree is a pure function of these receipts in order, so replaying the
+/// file reconstructs the exact same root — disk is the source of truth.
+struct Store {
+    file: std::fs::File,
+}
+
+impl Store {
+    /// Open (creating if absent) the log at `path`, replaying every persisted
+    /// receipt into `witness` in order, then leave the file open for appends.
+    fn open(path: &Path, witness: &mut Witness) -> io::Result<Store> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        let mut cursor = 0usize;
+        while cursor + 4 <= bytes.len() {
+            let len =
+                u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().expect("4 bytes")) as usize;
+            cursor += 4;
+            if cursor + len > bytes.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "truncated witness log frame",
+                ));
+            }
+            let receipt: ActionReceipt = serde_json::from_slice(&bytes[cursor..cursor + len])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            witness.append(&receipt);
+            cursor += len;
+        }
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)?;
+        Ok(Store { file })
+    }
+
+    /// Durably append one receipt as a length-prefixed frame (flushed to the OS
+    /// before returning, so an acked entry is on disk).
+    fn append(&mut self, receipt: &ActionReceipt) -> io::Result<()> {
+        let bytes = receipt.canonical_bytes();
+        let len = u32::try_from(bytes.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "receipt frame too large"))?;
+        self.file.write_all(&len.to_le_bytes())?;
+        self.file.write_all(&bytes)?;
+        self.file.flush()
     }
 }
 
@@ -231,6 +307,9 @@ pub enum ApiError {
     /// The response body *is* the equivocation evidence (two operator-signed
     /// heads that can't be reconciled).
     Equivocation(serde_json::Value),
+    /// The log could not be persisted; the append is rejected rather than acked
+    /// without durability (fail closed).
+    Internal(String),
 }
 
 impl IntoResponse for ApiError {
@@ -252,6 +331,10 @@ impl IntoResponse for ApiError {
                 }),
             ),
             ApiError::Equivocation(evidence) => (StatusCode::CONFLICT, evidence),
+            ApiError::Internal(detail) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "title": "internal error", "detail": detail }),
+            ),
         };
         (status, Json(body)).into_response()
     }
@@ -269,6 +352,18 @@ async fn submit(
         let mut w = st.witness.lock().expect("witness mutex poisoned");
         if receipt.prev_root != w.root() {
             return Err(ApiError::StalePrevRoot);
+        }
+        // Durability: persist the receipt (and flush) BEFORE the in-memory
+        // append and before we ack, so a crash between the two is recovered by
+        // replay — disk is authoritative, an acked entry is never lost. Only
+        // `submit` touches the store, always under the witness lock, so the
+        // witness→store lock order is globally consistent.
+        if let Some(store) = &st.store {
+            store
+                .lock()
+                .expect("store mutex poisoned")
+                .append(&receipt)
+                .map_err(|e| ApiError::Internal(format!("persist: {e}")))?;
         }
         let idx = w.append(&receipt);
         let proof = w
@@ -570,5 +665,64 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["keys"][0]["alg"], "ed25519");
         assert_eq!(body["keys"][0]["public_key"], b64(&st.log_key.bytes));
+    }
+
+    fn temp_log_path() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir().join(format!(
+            "indexone-witness-persist-{}-{}.log",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn persisted_log_survives_restart() {
+        let path = temp_log_path();
+        let seed = [7u8; 32];
+
+        // Instance 1: append three chained receipts (disk + memory, exactly as
+        // `submit` does) and record the resulting root and length.
+        let (expected_root, expected_len) = {
+            let st = AppState::with_persistence(Ed25519Signer::from_seed(seed), &path).unwrap();
+            let mut w = st.witness.lock().unwrap();
+            let mut prev = w.root();
+            for i in 0..3u8 {
+                let r = ActionReceipt {
+                    chain_digest: [i; 32],
+                    action_digest: [i; 32],
+                    nonce: [i; 32],
+                    prev_root: prev,
+                };
+                st.store
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .append(&r)
+                    .unwrap();
+                w.append(&r);
+                prev = w.root();
+            }
+            (w.root(), w.len())
+        };
+
+        // Instance 2: reopen the same path — the tree is rebuilt from disk, so
+        // root and length match exactly and every past inclusion proof still
+        // verifies against the recovered root.
+        let st2 = AppState::with_persistence(Ed25519Signer::from_seed(seed), &path).unwrap();
+        {
+            let w2 = st2.witness.lock().unwrap();
+            assert_eq!(w2.len(), expected_len);
+            assert_eq!(w2.root(), expected_root);
+        }
+        std::fs::remove_file(&path).ok();
+
+        // A fresh (absent) path opens as a size-0 log — no stale state leaks in.
+        let fresh = temp_log_path();
+        let empty = AppState::with_persistence(Ed25519Signer::from_seed(seed), &fresh).unwrap();
+        assert_eq!(empty.witness.lock().unwrap().len(), 0);
+        std::fs::remove_file(&fresh).ok();
     }
 }
