@@ -270,6 +270,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexone-revlog"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "indexone-crypto",
+ "indexone-revmap",
+ "indexone-witness",
+ "serde",
+]
+
+[[package]]
 name = "indexone-revmap"
 version = "0.0.1"
 dependencies = [

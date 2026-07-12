@@ -43,12 +43,12 @@ The transport (fetching the snapshot over the network) is injected via the
 `SnapshotSource` trait, so `core/revocation` stays synchronous and dependency-light;
 the concrete HTTP source lives in a separate crate.
 
-## v2 — sparse Merkle map (built) + log-backing (next)
+## v2 — log-backed sparse Merkle map (built)
 
 When the threat model demands defending against a *misbehaving* operator
 per-request (not just an unreliable one), the upgrade is a **log-backed sparse
-Merkle map**. Two composable pieces, both grounded in the survey below.
-**Piece (a) is now built** in `core/revmap`; piece (b) is the remaining step.
+Merkle map**. Two composable pieces, both grounded in the survey below, **both
+now built**: piece (a) in `core/revmap`, piece (b) in `core/revlog`.
 
 **(a) Sparse Merkle map keyed by the 32-byte `RevocationId`** — *implemented in
 `core/revmap` (`RevocationMap`, `verify_non_inclusion`): blake3-only, no C deps,
@@ -76,19 +76,25 @@ depends only on blake3 + serde, and passes the same adversarial forged-proof tes
 the crate does. (`ct-merkle`/`rs_merkle` were the wrong tool regardless —
 append-only/plain trees, no absence proofs.)
 
-**(b) Log-back it (Trillian VLDM pattern).** A bare signed map has no native
-append-only check, so it can silently **equivocate** (different root to different
-observers) or **roll back** (un-revoke by omitting an entry) — the exact holes v1
-mitigates only by monotonic epoch + gossip. The fix: commit each epoch's map root
-as **one leaf in the RFC 6962 log we already run** (`core/witness` +
-`services/witness`), with the leaf payload `{epoch, map_root, log_STH_it_was_built_over}`.
-A client then verifies **three** proofs, reusing the log's existing APIs
-unchanged: (1) map (non-)inclusion of the id against `map_root`; (2) log inclusion
-that the `map_root` leaf is in the log; (3) log consistency from its last-seen STH
-→ current STH. Proof (2) kills equivocation (a contradictory root is a second,
-detectable leaf); proof (3) kills silent rollback (the epoch sequence can only
-grow). Added surface is small: one map + the "root → log leaf" rule; no new log
-proof types.
+**(b) Log-back it (Trillian VLDM pattern)** — *implemented in `core/revlog`
+(`LogBackedRevocation`, `verify_not_revoked`), composing `revmap` + `witness`
+with no change to either; 5 tests.* A bare signed map has no native append-only
+check, so it can silently **equivocate** (different root to different observers)
+or **roll back** (un-revoke by omitting an entry) — the exact holes v1 mitigates
+only by monotonic epoch + gossip. The fix: commit each epoch's map root as **one
+leaf in the RFC 6962 log we already run** (`core/witness` + `services/witness`),
+as a `MapCheckpoint {epoch, map_root, prev_log_root}` whose domain-separated
+digest is the leaf's `action_digest`. A client then verifies **three** things,
+reusing the log's existing APIs unchanged: (1) map (non-)inclusion of the id
+against `map_root`; (2) that this exact `map_root` is the logged one — the
+checkpoint leaf's inclusion proof against a validly-signed tree head; (3) log
+consistency from its last-seen STH → current STH. (2) kills equivocation (a
+contradictory root is a second, detectable leaf; a forged `map_root` changes the
+checkpoint digest and breaks inclusion — covered by the `forged_map_root_is_rejected`
+test); (3) kills silent rollback (the epoch sequence can only grow — `old_size >
+new_size` is refused). Added surface was small: one checkpoint type + the "root →
+log leaf" rule; no new log proof types, and the map root is committed via the
+receipt's caller-defined `action_digest` rather than a witness change.
 
 **Honest boundary (unchanged from v1's spirit).** Log-backing buys
 *detectability* of root-equivocation and rollback — **not completeness**. An
