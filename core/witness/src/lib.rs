@@ -108,8 +108,18 @@ pub struct ConsistencyProof {
 /// Append-only Merkle transparency log over [`ActionReceipt`] leaves.
 #[derive(Debug, Clone, Default)]
 pub struct Witness {
-    /// Canonical bytes of each appended receipt, in order.
-    entries: Vec<Vec<u8>>,
+    /// Leaf hash of each appended entry, in order. Append-only ⇒ each is
+    /// immutable once set. The raw receipt bytes are not retained — the leaf
+    /// hash is all the tree needs; callers that need the receipts keep them
+    /// (e.g. the witness service's durable log does).
+    leaf_hashes: Vec<Digest>,
+    /// Memoized roots of *perfect, aligned* subtrees, keyed by `(start, len)`.
+    /// In an append-only log a subtree over a fixed leaf range never changes, so
+    /// this is correct with **no invalidation** and turns root/proof generation
+    /// from O(n) into O(log n). Interior-mutable so `&self` read paths can fill
+    /// it; the `RefCell` keeps `Witness` !Sync, so sharing needs the usual
+    /// `Mutex` (which the service already uses).
+    subtree_cache: std::cell::RefCell<std::collections::HashMap<(usize, usize), Digest>>,
 }
 
 /// Empty-tree root (RFC 6962: hash of the empty string, domain-separated as a
@@ -127,53 +137,6 @@ fn split_point(n: usize) -> usize {
     k
 }
 
-/// Root of `leaves[..]` (each entry is raw leaf data, hashed here).
-fn subtree_root(leaves: &[Vec<u8>]) -> Digest {
-    let hashes: Vec<Digest> = leaves.iter().map(|d| hash_leaf(d)).collect();
-    merkle_root_of_hashes(&hashes)
-}
-
-/// Root over already-hashed leaves — the shared core used by both
-/// [`subtree_root`] and the RFC 6962 consistency-proof machinery below, so the
-/// two never diverge on tree shape.
-fn merkle_root_of_hashes(leaves: &[Digest]) -> Digest {
-    match leaves.len() {
-        0 => empty_root(),
-        1 => leaves[0],
-        n => {
-            let k = split_point(n);
-            hash_node(
-                &merkle_root_of_hashes(&leaves[..k]),
-                &merkle_root_of_hashes(&leaves[k..]),
-            )
-        }
-    }
-}
-
-/// Audit path (leaf-up) for `index` within `leaves[..]`.
-fn subtree_path(leaves: &[Vec<u8>], index: usize) -> Vec<PathStep> {
-    let n = leaves.len();
-    if n <= 1 {
-        return Vec::new();
-    }
-    let k = split_point(n);
-    if index < k {
-        let mut path = subtree_path(&leaves[..k], index);
-        path.push(PathStep {
-            sibling: subtree_root(&leaves[k..]),
-            sibling_is_left: false,
-        });
-        path
-    } else {
-        let mut path = subtree_path(&leaves[k..], index - k);
-        path.push(PathStep {
-            sibling: subtree_root(&leaves[..k]),
-            sibling_is_left: true,
-        });
-        path
-    }
-}
-
 impl Witness {
     pub fn new() -> Self {
         Self::default()
@@ -181,35 +144,35 @@ impl Witness {
 
     /// Current Merkle root — the value receipts and attestations commit to.
     pub fn root(&self) -> Digest {
-        subtree_root(&self.entries)
+        self.subtree(0, self.leaf_hashes.len())
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.leaf_hashes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.leaf_hashes.is_empty()
     }
 
     /// Append a receipt, returning its leaf index. Callers should build the
     /// receipt with `prev_root = witness.root()` *before* appending so receipts
     /// chain.
     pub fn append(&mut self, receipt: &ActionReceipt) -> usize {
-        let index = self.entries.len();
-        self.entries.push(receipt.canonical_bytes());
+        let index = self.leaf_hashes.len();
+        self.leaf_hashes.push(hash_leaf(&receipt.canonical_bytes()));
         index
     }
 
     /// Inclusion proof for the leaf at `index`, or `None` if out of range.
     pub fn inclusion_proof(&self, index: usize) -> Option<InclusionProof> {
-        if index >= self.entries.len() {
+        if index >= self.leaf_hashes.len() {
             return None;
         }
         Some(InclusionProof {
             leaf_index: index,
-            tree_size: self.entries.len(),
-            path: subtree_path(&self.entries, index),
+            tree_size: self.leaf_hashes.len(),
+            path: self.subtree_path(0, self.leaf_hashes.len(), index),
         })
     }
 
@@ -218,35 +181,86 @@ impl Witness {
     /// you prove consistency *up to* the log's current head. Returns `None`
     /// (fail closed) unless `old_size <= new_size == len`.
     pub fn consistency_proof(&self, old_size: usize, new_size: usize) -> Option<ConsistencyProof> {
-        if new_size != self.entries.len() || old_size > new_size {
+        if new_size != self.leaf_hashes.len() || old_size > new_size {
             return None;
         }
         let mut nodes = Vec::new();
         if old_size != 0 && old_size != new_size {
-            let hashes: Vec<Digest> = self.entries.iter().map(|e| hash_leaf(e)).collect();
-            subproof(old_size, &hashes[..new_size], true, &mut nodes);
+            self.subproof(old_size, 0, new_size, true, &mut nodes);
         }
         Some(ConsistencyProof { nodes })
     }
-}
 
-/// RFC 6962 `SUBPROOF(m, D[n], b)`, appending nodes to `out` in proof order.
-fn subproof(m: usize, leaves: &[Digest], b: bool, out: &mut Vec<Digest>) {
-    let n = leaves.len();
-    if m == n {
-        // MTH(D[0:m]) is a known root iff `b`; otherwise it must be supplied.
-        if !b {
-            out.push(merkle_root_of_hashes(leaves));
+    // ── memoized tree core ──────────────────────────────────────────────────
+    //
+    // These compute exactly what a naive RFC 6962 recomputation over
+    // `leaf_hashes[start..start+len]` would (proven byte-for-byte in the tests'
+    // differential oracle), but memoize *perfect, aligned* subtrees. Such a
+    // subtree over a fixed leaf range is immutable in an append-only log, so the
+    // cache is never invalidated; only the O(log n) right "spine" is recomputed.
+
+    /// Root over the leaf-hash range `[start, start + len)` (RFC 6962 MTH).
+    fn subtree(&self, start: usize, len: usize) -> Digest {
+        match len {
+            0 => empty_root(),
+            1 => self.leaf_hashes[start],
+            _ => {
+                let perfect = len.is_power_of_two() && start.is_multiple_of(len);
+                if perfect {
+                    if let Some(h) = self.subtree_cache.borrow().get(&(start, len)) {
+                        return *h;
+                    }
+                }
+                let k = split_point(len);
+                let h = hash_node(&self.subtree(start, k), &self.subtree(start + k, len - k));
+                if perfect {
+                    self.subtree_cache.borrow_mut().insert((start, len), h);
+                }
+                h
+            }
         }
-        return;
     }
-    let k = split_point(n);
-    if m <= k {
-        subproof(m, &leaves[..k], b, out);
-        out.push(merkle_root_of_hashes(&leaves[k..]));
-    } else {
-        subproof(m - k, &leaves[k..], false, out);
-        out.push(merkle_root_of_hashes(&leaves[..k]));
+
+    /// Audit path (leaf-up) for `index` within the range `[start, start + len)`.
+    fn subtree_path(&self, start: usize, len: usize, index: usize) -> Vec<PathStep> {
+        if len <= 1 {
+            return Vec::new();
+        }
+        let k = split_point(len);
+        if index < k {
+            let mut path = self.subtree_path(start, k, index);
+            path.push(PathStep {
+                sibling: self.subtree(start + k, len - k),
+                sibling_is_left: false,
+            });
+            path
+        } else {
+            let mut path = self.subtree_path(start + k, len - k, index - k);
+            path.push(PathStep {
+                sibling: self.subtree(start, k),
+                sibling_is_left: true,
+            });
+            path
+        }
+    }
+
+    /// RFC 6962 `SUBPROOF(m, D[start..start+len], b)`, over the leaf-hash range.
+    fn subproof(&self, m: usize, start: usize, len: usize, b: bool, out: &mut Vec<Digest>) {
+        if m == len {
+            // MTH(D[0:m]) is a known root iff `b`; otherwise it must be supplied.
+            if !b {
+                out.push(self.subtree(start, len));
+            }
+            return;
+        }
+        let k = split_point(len);
+        if m <= k {
+            self.subproof(m, start, k, b, out);
+            out.push(self.subtree(start + k, len - k));
+        } else {
+            self.subproof(m - k, start + k, len - k, false, out);
+            out.push(self.subtree(start, k));
+        }
     }
 }
 
@@ -381,7 +395,7 @@ fn sth_signing_bytes(tree_size: usize, root: &Digest) -> Vec<u8> {
 impl Witness {
     /// Sign the current tree head with the log operator's key, for gossip.
     pub fn signed_head(&self, signer: &dyn Signer) -> SignedTreeHead {
-        let tree_size = self.entries.len();
+        let tree_size = self.leaf_hashes.len();
         let root = self.root();
         let signature = signer
             .sign(&sth_signing_bytes(tree_size, &root))
@@ -469,6 +483,126 @@ mod tests {
             action_digest: [action; 32],
             nonce: [action; 32],
             prev_root: [0u8; 32],
+        }
+    }
+
+    /// A distinct receipt for each `i` (so large trees have unique leaves).
+    fn receipt_n(i: usize) -> ActionReceipt {
+        let mut d = [0u8; 32];
+        d[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        ActionReceipt {
+            chain_digest: [1u8; 32],
+            action_digest: d,
+            nonce: d,
+            prev_root: [0u8; 32],
+        }
+    }
+
+    // ── Naive RFC 6962 oracle: a from-scratch, cache-free recomputation. The
+    //    memoized `Witness` methods MUST produce byte-identical output; the
+    //    differential tests below assert that for every small size/index/pair,
+    //    so the optimization can never silently change a root or a proof.
+
+    fn naive_root(hashes: &[Digest]) -> Digest {
+        match hashes.len() {
+            0 => empty_root(),
+            1 => hashes[0],
+            n => {
+                let k = split_point(n);
+                hash_node(&naive_root(&hashes[..k]), &naive_root(&hashes[k..]))
+            }
+        }
+    }
+
+    fn naive_path(hashes: &[Digest], index: usize) -> Vec<PathStep> {
+        let n = hashes.len();
+        if n <= 1 {
+            return Vec::new();
+        }
+        let k = split_point(n);
+        if index < k {
+            let mut p = naive_path(&hashes[..k], index);
+            p.push(PathStep {
+                sibling: naive_root(&hashes[k..]),
+                sibling_is_left: false,
+            });
+            p
+        } else {
+            let mut p = naive_path(&hashes[k..], index - k);
+            p.push(PathStep {
+                sibling: naive_root(&hashes[..k]),
+                sibling_is_left: true,
+            });
+            p
+        }
+    }
+
+    fn naive_subproof(m: usize, hashes: &[Digest], b: bool, out: &mut Vec<Digest>) {
+        let n = hashes.len();
+        if m == n {
+            if !b {
+                out.push(naive_root(hashes));
+            }
+            return;
+        }
+        let k = split_point(n);
+        if m <= k {
+            naive_subproof(m, &hashes[..k], b, out);
+            out.push(naive_root(&hashes[k..]));
+        } else {
+            naive_subproof(m - k, &hashes[k..], false, out);
+            out.push(naive_root(&hashes[..k]));
+        }
+    }
+
+    #[test]
+    fn cached_root_matches_naive_oracle_for_all_sizes() {
+        let mut w = Witness::new();
+        let mut hashes: Vec<Digest> = Vec::new();
+        for n in 0..=300usize {
+            assert_eq!(w.root(), naive_root(&hashes), "root mismatch at size {n}");
+            let r = receipt_n(n);
+            hashes.push(hash_leaf(&r.canonical_bytes()));
+            w.append(&r);
+        }
+    }
+
+    #[test]
+    fn cached_inclusion_paths_match_naive_oracle() {
+        let mut w = Witness::new();
+        let mut hashes: Vec<Digest> = Vec::new();
+        for n in 1..=200usize {
+            let r = receipt_n(n - 1);
+            hashes.push(hash_leaf(&r.canonical_bytes()));
+            w.append(&r);
+            for i in 0..n {
+                let got = w.inclusion_proof(i).expect("in range").path;
+                let want = naive_path(&hashes, i);
+                assert_eq!(got, want, "inclusion path mismatch: size {n}, index {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn cached_consistency_proofs_match_naive_oracle() {
+        let mut w = Witness::new();
+        let mut hashes: Vec<Digest> = Vec::new();
+        for new in 0..=150usize {
+            // w and `hashes` both hold `new` leaves at this point.
+            for old in 0..=new {
+                let got = w.consistency_proof(old, new).expect("valid range").nodes;
+                let mut want = Vec::new();
+                if old != 0 && old != new {
+                    naive_subproof(old, &hashes[..new], true, &mut want);
+                }
+                assert_eq!(
+                    got, want,
+                    "consistency nodes mismatch: old {old}, new {new}"
+                );
+            }
+            let r = receipt_n(new);
+            hashes.push(hash_leaf(&r.canonical_bytes()));
+            w.append(&r);
         }
     }
 
