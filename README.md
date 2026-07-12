@@ -1,6 +1,13 @@
-# index-one
+# IndexOne
 
-The verification layer for agent-to-agent communication that proves the chain of permission behind every action.
+> **IndexOne** (one word, camel case) is the canonical product name. `indexone-*`
+> (Rust crates) and `indexone` (Python package) are the code identifiers; the
+> repo directory is `index-one`.
+
+The tamper-evident **chain-of-authority** layer for multi-agent actions — the
+verification layer for agent-to-agent communication that proves the chain of
+permission behind every action. When an action crosses companies and something
+goes wrong, IndexOne is the cryptographic proof of *who authorized what*.
 
 ## What this is
 
