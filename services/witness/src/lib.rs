@@ -97,38 +97,70 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e),
         };
+        // Replay every COMPLETE frame. A torn *trailing* frame — a partial length
+        // prefix, or a length prefix whose body was not fully written — is an
+        // append that crashed before it was fsync'd/acked; recover by truncating
+        // back to the last complete frame rather than refusing to start. Interior
+        // corruption (a bad frame with more data after it) is genuine damage and
+        // still fails closed.
+        let mut committed = 0usize;
         let mut cursor = 0usize;
         while cursor + 4 <= bytes.len() {
             let len =
                 u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().expect("4 bytes")) as usize;
-            cursor += 4;
-            if cursor + len > bytes.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "truncated witness log frame",
-                ));
+            let body = cursor + 4;
+            if body + len > bytes.len() {
+                break; // torn trailing frame: the body was not fully written
             }
-            let receipt: ActionReceipt = serde_json::from_slice(&bytes[cursor..cursor + len])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            witness.append(&receipt);
-            cursor += len;
+            match serde_json::from_slice::<ActionReceipt>(&bytes[body..body + len]) {
+                Ok(receipt) => {
+                    witness.append(&receipt);
+                }
+                Err(e) => {
+                    // Interior (non-trailing) unparseable frame is real corruption;
+                    // a length-complete-but-bad frame at the very end is treated as
+                    // an uncommitted torn append and truncated.
+                    if body + len < bytes.len() {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+                    }
+                    break;
+                }
+            }
+            cursor = body + len;
+            committed = cursor;
         }
         let file = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(path)?;
+        // Physically drop any torn trailing bytes so the next append lands on a
+        // frame boundary, and fsync the truncation.
+        if committed < bytes.len() {
+            file.set_len(committed as u64)?;
+            file.sync_all()?;
+        }
+        // Best-effort: fsync the directory so the log file's creation is itself
+        // durable (a crash right after create() can otherwise lose the entry).
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            if let Ok(dir_file) = std::fs::File::open(dir) {
+                let _ = dir_file.sync_all();
+            }
+        }
         Ok(Store { file })
     }
 
-    /// Durably append one receipt as a length-prefixed frame (flushed to the OS
-    /// before returning, so an acked entry is on disk).
+    /// Durably append one receipt as a length-prefixed frame, **fsync'd to the
+    /// physical device** before returning, so an acked entry survives power loss
+    /// / kernel panic — not just a clean process exit.
     fn append(&mut self, receipt: &ActionReceipt) -> io::Result<()> {
         let bytes = receipt.canonical_bytes();
         let len = u32::try_from(bytes.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "receipt frame too large"))?;
         self.file.write_all(&len.to_le_bytes())?;
         self.file.write_all(&bytes)?;
-        self.file.flush()
+        // fsync, not flush(): flush() only pushes to the OS page cache, which a
+        // power loss can still lose. sync_all() forces bytes + metadata to disk.
+        self.file.sync_all()
     }
 }
 
@@ -724,5 +756,110 @@ mod tests {
         let empty = AppState::with_persistence(Ed25519Signer::from_seed(seed), &fresh).unwrap();
         assert_eq!(empty.witness.lock().unwrap().len(), 0);
         std::fs::remove_file(&fresh).ok();
+    }
+
+    /// Write `count` chained receipts to a fresh persisted log and return the
+    /// resulting (root, len). Shared setup for the crash-recovery tests.
+    fn seed_log(path: &Path, seed: [u8; 32], count: u8) -> (Digest, usize) {
+        let st = AppState::with_persistence(Ed25519Signer::from_seed(seed), path).unwrap();
+        let mut w = st.witness.lock().unwrap();
+        let mut prev = w.root();
+        for i in 0..count {
+            let r = ActionReceipt {
+                chain_digest: [i; 32],
+                action_digest: [i; 32],
+                nonce: [i; 32],
+                prev_root: prev,
+            };
+            st.store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .append(&r)
+                .unwrap();
+            w.append(&r);
+            prev = w.root();
+        }
+        (w.root(), w.len())
+    }
+
+    /// Crash mid-append: a length prefix whose body was only partially written to
+    /// disk before power loss. On restart the torn frame is dropped (it was never
+    /// acked), the committed frames replay, and the log keeps working — durably.
+    #[test]
+    fn torn_trailing_frame_is_recovered_on_restart() {
+        use std::io::Write;
+        let path = temp_log_path();
+        let seed = [8u8; 32];
+        let (root2, len2) = seed_log(&path, seed, 2);
+
+        // Simulate the crash: a frame claiming 100 bytes, of which only 3 landed.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(&100u32.to_le_bytes()).unwrap();
+            f.write_all(&[1u8, 2, 3]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Reopen: torn frame dropped, committed frames intact, and a fresh append
+        // lands on the recovered boundary.
+        let expected = {
+            let st = AppState::with_persistence(Ed25519Signer::from_seed(seed), &path).unwrap();
+            let mut w = st.witness.lock().unwrap();
+            assert_eq!(w.len(), len2, "torn frame must not be counted");
+            assert_eq!(
+                w.root(),
+                root2,
+                "recovered root must match the committed log"
+            );
+            let r = ActionReceipt {
+                chain_digest: [9; 32],
+                action_digest: [9; 32],
+                nonce: [9; 32],
+                prev_root: w.root(),
+            };
+            st.store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .append(&r)
+                .unwrap();
+            w.append(&r);
+            (w.root(), w.len())
+        };
+
+        // The truncation + the new append both survive another restart.
+        let st3 = AppState::with_persistence(Ed25519Signer::from_seed(seed), &path).unwrap();
+        let w3 = st3.witness.lock().unwrap();
+        assert_eq!((w3.root(), w3.len()), expected);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A crash that left only a *partial length prefix* (< 4 bytes) at the tail is
+    /// likewise recovered — the committed frames still replay.
+    #[test]
+    fn partial_length_prefix_is_recovered_on_restart() {
+        use std::io::Write;
+        let path = temp_log_path();
+        let seed = [8u8; 32];
+        let (root1, len1) = seed_log(&path, seed, 1);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(&[0xAB, 0xCD]).unwrap(); // 2 stray bytes of a length prefix
+            f.sync_all().unwrap();
+        }
+        let st2 = AppState::with_persistence(Ed25519Signer::from_seed(seed), &path).unwrap();
+        let w2 = st2.witness.lock().unwrap();
+        assert_eq!(w2.len(), len1);
+        assert_eq!(w2.root(), root1);
+        std::fs::remove_file(&path).ok();
     }
 }
