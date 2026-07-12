@@ -11,18 +11,31 @@ on:
 
 jobs:
   cargo-audit:
-    name: cargo audit (core)
+    # One job per lockfile — the standalone crates (services, clients, exploits,
+    # conformance, benchmarks) each carry their own Cargo.lock outside the core
+    # workspace, so `core` alone left axum/tokio/reqwest/sd-jwt/criterion deps
+    # unaudited. audit-check runs `cargo audit` in `working-directory` (it does
+    # NOT accept manifest-path), so we point it at each lockfile's directory.
+    name: cargo audit (${{ matrix.dir }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir:
+          - core
+          - services/witness
+          - services/revocation-log
+          - clients/revocation-http
+          - exploits
+          - conformance
+          - benchmarks
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # The Rust workspace lives under core/. audit-check runs `cargo audit`
-          # in working-directory (it does NOT accept manifest-path), so point it
-          # at core/ where Cargo.toml + the committed Cargo.lock are.
-          working-directory: core
+          working-directory: ${{ matrix.dir }}
 
   pip-audit:
     name: pip-audit (${{ matrix.package }})
