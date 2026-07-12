@@ -13,5 +13,7 @@ indexone-crypto = { workspace = true }
 indexone-chain = { workspace = true }
 indexone-witness = { workspace = true }
 indexone-attestation = { path = "../attestation" }
+indexone-revocation = { path = "../revocation" }
+indexone-revlog = { path = "../revlog" }
 
 [dev-dependencies]
