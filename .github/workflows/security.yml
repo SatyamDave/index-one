@@ -19,7 +19,10 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          manifest-path: core/Cargo.toml
+          # The Rust workspace lives under core/. audit-check runs `cargo audit`
+          # in working-directory (it does NOT accept manifest-path), so point it
+          # at core/ where Cargo.toml + the committed Cargo.lock are.
+          working-directory: core
 
   pip-audit:
     name: pip-audit (${{ matrix.package }})

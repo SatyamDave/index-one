@@ -99,7 +99,9 @@ pub struct ShortTtlChecker {
 
 impl RevocationChecker for ShortTtlChecker {
     fn is_revoked(&self, _id: &RevocationId) -> Result<bool, RevocationError> {
-        Err(RevocationError::NotImplemented("ShortTtlChecker::is_revoked"))
+        Err(RevocationError::NotImplemented(
+            "ShortTtlChecker::is_revoked",
+        ))
     }
 }
 

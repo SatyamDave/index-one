@@ -24,17 +24,31 @@ We sit on top of existing payment/agent rails (Google AP2, Visa TAP,
 Mastercard Agent Pay) and solve the multi-hop, cross-organization
 attribution problem those rails leave unsolved.
 
-> **Status: early-stage scaffold.** No cryptography is implemented yet —
-> see [`/docs/REFERENCE.md`](docs/REFERENCE.md) for the design invariants,
-> prior art, and papers this is built from.
+> **Status: foundation in place.** The Rust core now has real crypto and a
+> working verifier: Ed25519 signing, a cryptographically-bound delegation
+> chain, a Merkle transparency witness, independent completion attestation,
+> and the composed `verify()` that ties them together and fails closed. The
+> Day-12 kill test (see [`CLAUDE.md`](CLAUDE.md) §9) is mechanized as tests
+> in the `verifier` crate. Still stubbed: `revocation`, and the Python SDK /
+> rail integrations. See [`/docs/REFERENCE.md`](docs/REFERENCE.md) for the
+> design invariants, prior art, and papers this is built from.
 
 ## Repo layout
 
 ```
-core/           Rust workspace -- the capability-token chain engine (built on Biscuit)
-  chain/          append-only signed delegation blocks (sign/attenuate/verify)
-  crypto/         signature-agility abstraction (Ed25519 now, ML-DSA/hybrid later)
-  revocation/     short-TTL + transparency-log revocation
+core/           Rust workspace. Grouped by CLAUDE.md §6 (substrate vs. our layer):
+
+  -- SUBSTRATE (integrate/extend, don't reinvent) --
+  crypto/         signature agility: real Ed25519 now, ML-DSA/hybrid later
+  chain/          append-only signed delegation blocks; cross-org attribution
+                  (issue / attenuate / verify, all cryptographically bound)
+  revocation/     short-TTL + transparency-log revocation (still stubbed)
+
+  -- OUR LAYER (what the competing drafts punt -- the company) --
+  witness/        cross-org Merkle transparency log; makes OMISSION detectable
+  attestation/    independent completion attestation (not self-reported)
+  verifier/       the composed verify(): chain + witness + attestation,
+                  fail-closed. Day-12 kill test lives in its tests.
 
 integrations/   Python -- rail integrations and the attack POC
   ap2/            adapters against the AP2 mandate format
@@ -46,7 +60,7 @@ sdk/            Thin public SDK (pip install indexone) -- wrap any agent, sign a
 
 docs/           Design reference: papers, prior art, standards, invariants (see REFERENCE.md)
 
-benchmarks/     Verification-latency and per-hop-size benchmarks
+benchmarks/     Verification-latency and per-hop-size benchmarks (real verify())
 ```
 
 ## Design invariants
@@ -63,21 +77,24 @@ Full detail, rationale, and the papers/prior art behind each of these:
 
 ## Getting started
 
-Nothing here is implemented yet beyond stub interfaces — there's no
-working build to run against real behavior. To exercise the scaffold:
+The Rust core builds, verifies real chains, and passes its tests —
+including the Day-12 kill test. The Python SDK / integrations are still
+thin stubs (except the runnable attack POC).
 
 ```bash
-# Rust workspace
-cd core && cargo test
+# Rust workspace: build, lint, and run the tests (incl. the Day-12 kill test)
+cargo test  --manifest-path core/Cargo.toml --workspace
+cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets -- -D warnings
 
-# Python integrations (editable install + tests)
-cd integrations && pip install -e ".[dev]" && pytest
+# See just the verifier's omission / self-report / equivocation cases
+cargo test  --manifest-path core/Cargo.toml -p indexone-verifier
 
-# Python SDK
-cd sdk/python && pip install -e ".[dev]" && pytest
-
-# Cross-org attribution attack demo (runnable, no real crypto)
+# Cross-org attribution attack demo (runnable; illustrative, not real crypto)
 cd integrations && pip install -e . && python -m integrations.attack.poc_cross_org_chain
+
+# Python integrations / SDK (editable install + tests)
+cd integrations && pip install -e ".[dev]" && pytest
+cd sdk/python   && pip install -e ".[dev]" && pytest
 ```
 
 ## Team
