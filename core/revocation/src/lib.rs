@@ -24,11 +24,12 @@
 //! block ([`revocation_ids_for_chain`]) and fails closed on the first hop that
 //! is revoked, stale, or undeterminable.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexone_chain::Chain;
-use indexone_crypto::Signature;
+use indexone_crypto::{verify_signature, PublicKey, Signature, Signer};
 use serde::{Deserialize, Serialize};
 
 /// Domain-separation prefix mixed into every [`RevocationId`] so the hash is
@@ -47,7 +48,7 @@ const REVOCATION_ID_DOMAIN: &[u8] = b"indexone-revocation/RevocationId/v1";
 ///   revoker who never held the signing key, name a specific block.
 /// - **Deterministic**: the same signature always yields the same id, so a
 ///   revocation published against an id matches on every future check.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RevocationId(pub Vec<u8>);
 
 impl RevocationId {
@@ -365,6 +366,165 @@ impl RevocationChecker for CompositeChecker {
     }
 }
 
+// ── Signed revocation snapshot (remote transparency, v1) ────────────────────
+//
+// An append-only Merkle log (the witness) proves *inclusion* but never
+// *absence* — yet the verifier's hot path is the negative query, "prove this
+// hop is NOT revoked". The v1 answer (per the CRLSet / Let's-Revoke / SCITT
+// trust model, see docs/REVOCATION_TRANSPARENCY.md) is a **signed, epoched,
+// complete snapshot**: the operator signs the whole revoked set with a
+// monotonic epoch + a publish timestamp; a client checks membership locally and
+// offline. Trust = signature + freshness (reusing the `Clock`) + a monotonic
+// epoch that blocks silent rollback. A malicious operator *omitting* an entry is
+// bounded, not eliminated — but the snapshot is signed, gossipable, and (because
+// `RevocationId` is keyless) independently recomputable, so equivocation is
+// detectable. The strict upgrade is a log-backed sparse Merkle tree (v2).
+
+const SNAPSHOT_DOMAIN: &[u8] = b"indexone-revocation/SignedRevocationSnapshot/v1";
+
+/// The exact bytes the operator signs: domain, epoch, publish time, and a
+/// blake3 digest over the *sorted* revoked set (`BTreeSet` iterates in order, so
+/// the digest is stable regardless of insertion order).
+fn snapshot_signing_bytes(
+    epoch: u64,
+    published_at: u64,
+    revoked: &BTreeSet<RevocationId>,
+) -> Vec<u8> {
+    let mut set_hasher = blake3::Hasher::new();
+    for id in revoked {
+        set_hasher.update(&(id.0.len() as u64).to_be_bytes());
+        set_hasher.update(&id.0);
+    }
+    let mut payload = Vec::with_capacity(SNAPSHOT_DOMAIN.len() + 16 + 32);
+    payload.extend_from_slice(SNAPSHOT_DOMAIN);
+    payload.extend_from_slice(&epoch.to_be_bytes());
+    payload.extend_from_slice(&published_at.to_be_bytes());
+    payload.extend_from_slice(set_hasher.finalize().as_bytes());
+    payload
+}
+
+/// A complete revocation set signed by the log operator at a point in time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedRevocationSnapshot {
+    /// Monotonic epoch; a client rejects any snapshot older than the newest it
+    /// has seen (anti-rollback).
+    pub epoch: u64,
+    /// Unix seconds the snapshot was published (freshness, via [`Clock`]).
+    pub published_at: u64,
+    /// The complete set of revoked ids at `epoch`. Sorted (`BTreeSet`) so the
+    /// signed digest is deterministic.
+    pub revoked: BTreeSet<RevocationId>,
+    pub signature: Signature,
+}
+
+impl SignedRevocationSnapshot {
+    /// Publish (sign) a snapshot of `revoked` as of `epoch`/`published_at`.
+    pub fn sign(
+        signer: &dyn Signer,
+        epoch: u64,
+        published_at: u64,
+        revoked: BTreeSet<RevocationId>,
+    ) -> Self {
+        let signature = signer
+            .sign(&snapshot_signing_bytes(epoch, published_at, &revoked))
+            .expect("sign revocation snapshot");
+        SignedRevocationSnapshot {
+            epoch,
+            published_at,
+            revoked,
+            signature,
+        }
+    }
+
+    /// Whether this snapshot is genuinely signed by `operator_key`.
+    pub fn verify_signature(&self, operator_key: &PublicKey) -> bool {
+        verify_signature(
+            &snapshot_signing_bytes(self.epoch, self.published_at, &self.revoked),
+            &self.signature,
+            operator_key,
+        )
+        .unwrap_or(false)
+    }
+}
+
+/// Anything that can supply the current [`SignedRevocationSnapshot`] — an HTTP
+/// fetch, a local mirror, a gossiped copy. Injected so [`SnapshotChecker`] is
+/// testable without a network (the concrete HTTP source lives in a separate
+/// crate so this one stays synchronous + dependency-light). `Err` = "couldn't
+/// obtain a snapshot" → the checker fails closed.
+pub trait SnapshotSource {
+    fn fetch(&self) -> Result<SignedRevocationSnapshot, String>;
+}
+
+/// A [`RevocationChecker`] backed by a remote signed snapshot. Each query pulls
+/// the current snapshot through the source and, before trusting it, verifies the
+/// operator signature, rejects a rolled-back `epoch`, and rejects one older than
+/// `max_staleness_secs` — any of which fails closed as
+/// [`RevocationError::LogUnreachable`] (couldn't determine), distinct from a
+/// definite `Revoked`. Only a signature-valid, fresh, non-rolled-back snapshot
+/// yields a `Live`/`Revoked` answer.
+pub struct SnapshotChecker<C: Clock> {
+    source: Box<dyn SnapshotSource + Send + Sync>,
+    operator_key: PublicKey,
+    clock: C,
+    max_staleness_secs: u64,
+    last_seen_epoch: AtomicU64,
+}
+
+impl<C: Clock> SnapshotChecker<C> {
+    pub fn new(
+        source: Box<dyn SnapshotSource + Send + Sync>,
+        operator_key: PublicKey,
+        clock: C,
+        max_staleness_secs: u64,
+    ) -> Self {
+        SnapshotChecker {
+            source,
+            operator_key,
+            clock,
+            max_staleness_secs,
+            last_seen_epoch: AtomicU64::new(0),
+        }
+    }
+}
+
+impl<C: Clock> RevocationChecker for SnapshotChecker<C> {
+    fn is_revoked(&self, id: &RevocationId) -> Result<RevocationStatus, RevocationError> {
+        let snapshot = self
+            .source
+            .fetch()
+            .map_err(RevocationError::LogUnreachable)?;
+
+        if !snapshot.verify_signature(&self.operator_key) {
+            return Err(RevocationError::LogUnreachable(
+                "revocation snapshot signature invalid".to_string(),
+            ));
+        }
+        if snapshot.epoch < self.last_seen_epoch.load(Ordering::SeqCst) {
+            return Err(RevocationError::LogUnreachable(
+                "revocation snapshot epoch rolled back".to_string(),
+            ));
+        }
+        let now = self.clock.now_unix();
+        if now.saturating_sub(snapshot.published_at) > self.max_staleness_secs {
+            return Err(RevocationError::LogUnreachable(format!(
+                "revocation snapshot is stale (published {}s ago > {}s)",
+                now.saturating_sub(snapshot.published_at),
+                self.max_staleness_secs
+            )));
+        }
+        self.last_seen_epoch.store(snapshot.epoch, Ordering::SeqCst);
+
+        if snapshot.revoked.contains(id) {
+            Ok(RevocationStatus::Revoked {
+                reason: "listed in the signed revocation snapshot".to_string(),
+            })
+        } else {
+            Ok(RevocationStatus::Live)
+        }
+    }
+}
+
 /// Checks every block in a chain for revocation via the given checker.
 ///
 /// This is the entry point the rest of index-one calls: `Chain::verify`
@@ -400,7 +560,8 @@ pub fn check_chain_revocation(
 mod tests {
     use super::*;
     use indexone_chain::{DelegationBlock, Principal, RootBlock, Scope};
-    use indexone_crypto::{Algorithm, PublicKey};
+    use indexone_crypto::{Algorithm, Ed25519Signer, PublicKey, Signer};
+    use std::sync::atomic::AtomicUsize;
 
     // 2100-01-01; scope expiry is irrelevant to these revocation tests (that's
     // the chain crate's concern), so it's pinned far in the future.
@@ -722,6 +883,132 @@ mod tests {
         let down = TransparencyLogChecker::with_transport(Box::new(DownTransport));
         assert!(matches!(
             down.is_revoked(&revoked),
+            Err(RevocationError::LogUnreachable(_))
+        ));
+    }
+
+    // ── Signed revocation snapshot ──────────────────────────────────────────
+
+    struct FixedSnapshot(SignedRevocationSnapshot);
+    impl SnapshotSource for FixedSnapshot {
+        fn fetch(&self) -> Result<SignedRevocationSnapshot, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Returns each snapshot in sequence (then repeats the last), so we can
+    /// exercise epoch rollback across successive queries.
+    struct SeqSource {
+        snaps: Vec<SignedRevocationSnapshot>,
+        i: AtomicUsize,
+    }
+    impl SnapshotSource for SeqSource {
+        fn fetch(&self) -> Result<SignedRevocationSnapshot, String> {
+            let idx = self
+                .i
+                .fetch_add(1, Ordering::SeqCst)
+                .min(self.snaps.len() - 1);
+            Ok(self.snaps[idx].clone())
+        }
+    }
+
+    fn snapshot(
+        signer: &Ed25519Signer,
+        epoch: u64,
+        published_at: u64,
+        revoked: &[RevocationId],
+    ) -> SignedRevocationSnapshot {
+        SignedRevocationSnapshot::sign(
+            signer,
+            epoch,
+            published_at,
+            revoked.iter().cloned().collect(),
+        )
+    }
+
+    /// A fresh, correctly-signed snapshot answers membership: a listed id is
+    /// Revoked, an unlisted id is Live.
+    #[test]
+    fn snapshot_checker_reports_revoked_and_live() {
+        let operator = Ed25519Signer::from_seed([50u8; 32]);
+        let revoked = RevocationId::from_signature(&sig(2));
+        let live = RevocationId::from_signature(&sig(5));
+        let snap = snapshot(&operator, 1, 1_000, std::slice::from_ref(&revoked));
+        let checker = SnapshotChecker::new(
+            Box::new(FixedSnapshot(snap)),
+            operator.public_key(),
+            FixedClock(1_100),
+            3_600,
+        );
+        assert!(matches!(
+            checker.is_revoked(&revoked).unwrap(),
+            RevocationStatus::Revoked { .. }
+        ));
+        assert_eq!(checker.is_revoked(&live).unwrap(), RevocationStatus::Live);
+    }
+
+    /// A snapshot older than the max-staleness window fails closed (reusing the
+    /// injected Clock) — you can't answer "not revoked" from a stale set.
+    #[test]
+    fn snapshot_checker_fails_closed_when_stale() {
+        let operator = Ed25519Signer::from_seed([50u8; 32]);
+        let snap = snapshot(&operator, 1, 1_000, &[]);
+        let checker = SnapshotChecker::new(
+            Box::new(FixedSnapshot(snap)),
+            operator.public_key(),
+            FixedClock(1_000 + 3_601), // one second past the window
+            3_600,
+        );
+        assert!(matches!(
+            checker.is_revoked(&RevocationId::from_signature(&sig(1))),
+            Err(RevocationError::LogUnreachable(_))
+        ));
+    }
+
+    /// A snapshot signed by anyone other than the trusted operator fails closed.
+    #[test]
+    fn snapshot_checker_rejects_wrong_signer() {
+        let operator = Ed25519Signer::from_seed([50u8; 32]);
+        let impostor = Ed25519Signer::from_seed([99u8; 32]);
+        let snap = snapshot(&impostor, 1, 1_000, &[]);
+        let checker = SnapshotChecker::new(
+            Box::new(FixedSnapshot(snap)),
+            operator.public_key(), // trusts operator, snapshot is impostor's
+            FixedClock(1_100),
+            3_600,
+        );
+        assert!(matches!(
+            checker.is_revoked(&RevocationId::from_signature(&sig(1))),
+            Err(RevocationError::LogUnreachable(_))
+        ));
+    }
+
+    /// Anti-rollback: after seeing epoch 5, a later (valid, fresh) snapshot at
+    /// epoch 2 is rejected — an operator can't quietly un-revoke by serving an
+    /// older set.
+    #[test]
+    fn snapshot_checker_rejects_epoch_rollback() {
+        let operator = Ed25519Signer::from_seed([50u8; 32]);
+        let id = RevocationId::from_signature(&sig(3));
+        let newer = snapshot(&operator, 5, 5_000, std::slice::from_ref(&id));
+        let older = snapshot(&operator, 2, 5_000, &[]); // fresh + valid, but epoch < 5
+        let checker = SnapshotChecker::new(
+            Box::new(SeqSource {
+                snaps: vec![newer, older],
+                i: AtomicUsize::new(0),
+            }),
+            operator.public_key(),
+            FixedClock(5_100),
+            3_600,
+        );
+        // First query pins last-seen epoch to 5 (and sees the id revoked).
+        assert!(matches!(
+            checker.is_revoked(&id).unwrap(),
+            RevocationStatus::Revoked { .. }
+        ));
+        // Second query gets the rolled-back epoch-2 snapshot → fail closed.
+        assert!(matches!(
+            checker.is_revoked(&id),
             Err(RevocationError::LogUnreachable(_))
         ));
     }
