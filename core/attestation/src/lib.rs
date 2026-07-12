@@ -76,7 +76,7 @@ impl From<indexone_crypto::CryptoError> for AttestationError {
 }
 
 /// Canonical bytes an attestation's signature covers (everything but the
-/// signature). TODO(attestation): RFC 8785 JCS before this is a wire format.
+/// signature), in RFC 8785 (JCS) form for cross-implementation verifiability.
 #[allow(clippy::too_many_arguments)]
 fn signing_payload(
     chain_digest: &Digest,
@@ -88,7 +88,7 @@ fn signing_payload(
     attester_key: &PublicKey,
     role: &AttesterRole,
 ) -> Vec<u8> {
-    serde_json::to_vec(&(
+    serde_jcs::to_vec(&(
         chain_digest,
         requested,
         outcome,

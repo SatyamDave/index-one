@@ -60,11 +60,10 @@ pub struct ActionReceipt {
 }
 
 impl ActionReceipt {
-    /// Canonical bytes committed as the Merkle leaf. TODO(witness): RFC 8785
-    /// JCS before this is a wire format; deterministic serde_json is enough for
-    /// now.
+    /// Canonical bytes committed as the Merkle leaf, in RFC 8785 (JCS) form so an
+    /// independent encoder computes the same leaf hash.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("serializable")
+        serde_jcs::to_vec(self).expect("serializable")
     }
 }
 
