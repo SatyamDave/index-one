@@ -17,3 +17,4 @@ indexone-revocation = { path = "../revocation" }
 indexone-revlog = { path = "../revlog" }
 
 [dev-dependencies]
+proptest.workspace = true
