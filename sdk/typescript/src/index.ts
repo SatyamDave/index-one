@@ -18,9 +18,19 @@
 
 import { spawnSync } from "node:child_process";
 
+/** A typed constraint that bounds where or how much a `Permission` applies. */
+export type Constraint = { amount_max: number } | { resource_in: string[] };
+
+/**
+ * A permission is either a bare action string, or a structured object with
+ * typed constraints. Constraints only tighten down a chain; the Rust core
+ * enforces the narrowing.
+ */
+export type Permission = string | { action: string; constraints: Constraint[] };
+
 /** Mirrors `indexone_chain::Scope`. */
 export interface Scope {
-  permissions: string[];
+  permissions: Permission[];
   max_depth: number;
   expires_at: number;
   budget?: number | null;

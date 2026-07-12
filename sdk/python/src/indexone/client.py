@@ -31,9 +31,19 @@ class IndexOneError(RuntimeError):
 
 @dataclass(frozen=True)
 class Scope:
-    """Mirrors ``indexone_chain::Scope``. See ``/core/chain/src/lib.rs``."""
+    """Mirrors ``indexone_chain::Scope``. See ``/core/chain/src/lib.rs``.
 
-    permissions: list[str]
+    A permission is either a bare action string (``"payments.charge"``) or a
+    structured object with typed constraints, e.g.::
+
+        {"action": "payments.charge",
+         "constraints": [{"amount_max": 500}, {"resource_in": ["airlines"]}]}
+
+    Constraints only tighten down a chain (amount ceilings lower, resource sets
+    shrink); the Rust core enforces the narrowing.
+    """
+
+    permissions: list[str | dict[str, Any]]
     max_depth: int
     expires_at: int
     budget: int | None = None
