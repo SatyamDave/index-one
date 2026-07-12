@@ -25,6 +25,157 @@
 
 use indexone_crypto::{verify_signature, PublicKey, Signer};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+/// A typed constraint that bounds where or how much a [`Permission`] applies.
+///
+/// Constraints only ever *tighten* down a chain. Each variant is one dimension
+/// of authority; a permission with no constraint on a dimension is unbounded on
+/// it. Serializes externally-tagged, e.g. `{"amount_max": 500}`,
+/// `{"resource_in": ["airlines"]}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Constraint {
+    /// Maximum amount (minor units) this permission authorizes per use. A child
+    /// may only lower it. Absent ⇒ unbounded on amount.
+    AmountMax(u64),
+    /// This permission applies only to resources in this set (e.g. merchant
+    /// categories, account ids). A child may only take a subset. Absent ⇒ any
+    /// resource. Multiple `ResourceIn` on one permission intersect.
+    ResourceIn(Vec<String>),
+}
+
+/// One permission in a [`Scope`]: an action plus optional typed [`Constraint`]s.
+///
+/// A bare permission (no constraints) is the common case and (de)serializes as a
+/// plain JSON string, so `"payments.charge"` — and every existing token,
+/// signature, and SDK call — keeps working byte-for-byte. A constrained
+/// permission serializes as `{"action": ..., "constraints": [...]}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Permission {
+    pub action: String,
+    pub constraints: Vec<Constraint>,
+}
+
+impl Permission {
+    /// A bare permission: an action, unbounded on every dimension.
+    pub fn action(action: impl Into<String>) -> Self {
+        Permission {
+            action: action.into(),
+            constraints: Vec::new(),
+        }
+    }
+
+    /// A permission carrying constraints.
+    pub fn with(action: impl Into<String>, constraints: Vec<Constraint>) -> Self {
+        Permission {
+            action: action.into(),
+            constraints,
+        }
+    }
+
+    /// This permission's amount ceiling (minor units), or `u64::MAX` if
+    /// unbounded. Multiple `AmountMax` take the tightest (min).
+    fn amount_max(&self) -> u64 {
+        self.constraints
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::AmountMax(n) => Some(*n),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+
+    /// The resource set this permission is confined to, or `None` for "any
+    /// resource". Multiple `ResourceIn` intersect (each further narrows).
+    fn resource_set(&self) -> Option<BTreeSet<&str>> {
+        let mut sets = self.constraints.iter().filter_map(|c| match c {
+            Constraint::ResourceIn(rs) => {
+                Some(rs.iter().map(String::as_str).collect::<BTreeSet<_>>())
+            }
+            _ => None,
+        });
+        let first = sets.next()?;
+        Some(sets.fold(first, |acc, s| acc.intersection(&s).copied().collect()))
+    }
+
+    /// Whether `self` authorizes a subset of `parent`'s authority: same action,
+    /// amount ceiling no higher, resource set no broader. A child may *add*
+    /// constraints (tighter) but never loosen one the parent imposed.
+    pub fn authorizes_subset_of(&self, parent: &Permission) -> bool {
+        if self.action != parent.action {
+            return false;
+        }
+        if self.amount_max() > parent.amount_max() {
+            return false;
+        }
+        match parent.resource_set() {
+            // Parent unbounded on resource ⇒ any child is a subset.
+            None => true,
+            // Parent confined ⇒ child must be confined to a subset of it.
+            Some(parent_set) => match self.resource_set() {
+                Some(child_set) => child_set.is_subset(&parent_set),
+                None => false, // child unbounded on resource, parent bounded ⇒ broader
+            },
+        }
+    }
+}
+
+impl From<&str> for Permission {
+    fn from(s: &str) -> Self {
+        Permission::action(s)
+    }
+}
+
+impl From<String> for Permission {
+    fn from(s: String) -> Self {
+        Permission::action(s)
+    }
+}
+
+impl Serialize for Permission {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Bare permission ⇒ a plain string (backward-compatible wire form).
+        if self.constraints.is_empty() {
+            serializer.serialize_str(&self.action)
+        } else {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("Permission", 2)?;
+            st.serialize_field("action", &self.action)?;
+            st.serialize_field("constraints", &self.constraints)?;
+            st.end()
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Permission {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Bare(String),
+            Full {
+                action: String,
+                #[serde(default)]
+                constraints: Vec<Constraint>,
+            },
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Bare(action) => Permission {
+                action,
+                constraints: Vec::new(),
+            },
+            Repr::Full {
+                action,
+                constraints,
+            } => Permission {
+                action,
+                constraints,
+            },
+        })
+    }
+}
 
 /// Monotonically narrowing permission envelope carried by every block.
 ///
@@ -33,10 +184,12 @@ use serde::{Deserialize, Serialize};
 /// decreases. Never the reverse. See [`Scope::is_narrowing_of`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
-    /// Opaque permission strings (e.g. `"payments.charge"`).
-    /// TODO(chain): replace with a structured/datalog scope type so scopes can
-    /// express constraints ("spend ≤ $X on category Y") not just string tags.
-    pub permissions: Vec<String>,
+    /// The actions this scope authorizes, each optionally carrying typed
+    /// [`Constraint`]s (amount ceilings, resource sets). Narrows monotonically:
+    /// every child permission must authorize a subset of *some* parent
+    /// permission ([`Permission::authorizes_subset_of`]). Bare permissions
+    /// (de)serialize as plain strings, so `["payments.charge"]` is unchanged.
+    pub permissions: Vec<Permission>,
     /// Maximum spend authorized, in minor units of `currency`. `None` = the
     /// scope places no budget ceiling.
     pub budget: Option<u64>,
@@ -54,8 +207,15 @@ impl Scope {
     /// currency (when both budgets are set) matches. Depth is checked
     /// separately at append time because it must *strictly* decrease.
     pub fn is_narrowing_of(&self, parent: &Scope) -> Result<(), ChainError> {
+        // Every child permission must authorize a subset of some parent
+        // permission: same action, no higher amount ceiling, no broader resource
+        // set. A child may add or tighten constraints, never loosen them.
         for perm in &self.permissions {
-            if !parent.permissions.contains(perm) {
+            if !parent
+                .permissions
+                .iter()
+                .any(|p| perm.authorizes_subset_of(p))
+            {
                 return Err(ChainError::ScopeWidened);
             }
         }
@@ -416,7 +576,7 @@ mod tests {
 
     fn scope(perms: &[&str], budget: u64, depth: u32) -> Scope {
         Scope {
-            permissions: perms.iter().map(|s| s.to_string()).collect(),
+            permissions: perms.iter().map(|s| Permission::action(*s)).collect(),
             budget: Some(budget),
             currency: Some("USD".to_string()),
             max_depth: depth,
@@ -573,5 +733,159 @@ mod tests {
             serde_jcs::to_vec(&a).unwrap(),
             serde_jcs::to_vec(&b).unwrap()
         );
+    }
+
+    // --- structured scope: constraint-entailment narrowing ---
+
+    fn cperm(action: &str, cs: Vec<Constraint>) -> Permission {
+        Permission::with(action, cs)
+    }
+
+    /// A scope whose single permission is `p` (budget/expiry equal so only the
+    /// permission dimension is under test).
+    fn scope_with(p: Permission) -> Scope {
+        let mut s = scope(&[], 10_000, 3);
+        s.permissions = vec![p];
+        s
+    }
+
+    #[test]
+    fn tightening_an_amount_cap_narrows() {
+        let parent = scope_with(cperm("payments.charge", vec![Constraint::AmountMax(500)]));
+        let child = scope_with(cperm("payments.charge", vec![Constraint::AmountMax(300)]));
+        assert!(child.is_narrowing_of(&parent).is_ok());
+    }
+
+    #[test]
+    fn raising_an_amount_cap_is_rejected() {
+        let parent = scope_with(cperm("payments.charge", vec![Constraint::AmountMax(300)]));
+        let child = scope_with(cperm("payments.charge", vec![Constraint::AmountMax(500)]));
+        assert_eq!(
+            child.is_narrowing_of(&parent).unwrap_err(),
+            ChainError::ScopeWidened
+        );
+    }
+
+    #[test]
+    fn adding_a_constraint_to_a_bare_parent_narrows() {
+        // Parent unbounded on amount + resource; child confines both → tighter.
+        let parent = scope_with(Permission::action("payments.charge"));
+        let child = scope_with(cperm(
+            "payments.charge",
+            vec![
+                Constraint::AmountMax(500),
+                Constraint::ResourceIn(vec!["airlines".into()]),
+            ],
+        ));
+        assert!(child.is_narrowing_of(&parent).is_ok());
+    }
+
+    #[test]
+    fn dropping_a_parent_constraint_is_rejected() {
+        // Parent caps the amount; a bare child is unbounded again → broader.
+        let parent = scope_with(cperm("payments.charge", vec![Constraint::AmountMax(500)]));
+        let child = scope_with(Permission::action("payments.charge"));
+        assert_eq!(
+            child.is_narrowing_of(&parent).unwrap_err(),
+            ChainError::ScopeWidened
+        );
+    }
+
+    #[test]
+    fn resource_subset_narrows_but_superset_is_rejected() {
+        let parent = scope_with(cperm(
+            "payments.charge",
+            vec![Constraint::ResourceIn(vec![
+                "airlines".into(),
+                "hotels".into(),
+            ])],
+        ));
+        let subset = scope_with(cperm(
+            "payments.charge",
+            vec![Constraint::ResourceIn(vec!["airlines".into()])],
+        ));
+        assert!(subset.is_narrowing_of(&parent).is_ok());
+        let superset = scope_with(cperm(
+            "payments.charge",
+            vec![Constraint::ResourceIn(vec![
+                "airlines".into(),
+                "hotels".into(),
+                "casinos".into(),
+            ])],
+        ));
+        assert_eq!(
+            superset.is_narrowing_of(&parent).unwrap_err(),
+            ChainError::ScopeWidened
+        );
+    }
+
+    #[test]
+    fn a_different_action_never_narrows() {
+        let parent = scope_with(Permission::action("payments.charge"));
+        let child = scope_with(Permission::action("payments.refund"));
+        assert_eq!(
+            child.is_narrowing_of(&parent).unwrap_err(),
+            ChainError::ScopeWidened
+        );
+    }
+
+    #[test]
+    fn bare_permission_serializes_as_a_plain_string() {
+        // Backward compatibility: a bare permission is a JSON string, so existing
+        // ["payments.charge"] tokens and the signatures over them are byte-identical.
+        let bare = Permission::action("payments.charge");
+        assert_eq!(serde_json::to_string(&bare).unwrap(), "\"payments.charge\"");
+        let back: Permission = serde_json::from_str("\"payments.charge\"").unwrap();
+        assert_eq!(back, bare);
+    }
+
+    #[test]
+    fn constrained_permission_round_trips_as_object() {
+        let p = Permission::with(
+            "payments.charge",
+            vec![
+                Constraint::AmountMax(500),
+                Constraint::ResourceIn(vec!["airlines".into()]),
+            ],
+        );
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"action\"") && json.contains("amount_max"));
+        let back: Permission = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn structured_narrowing_holds_through_a_signed_chain() {
+        // End-to-end: a constrained permission attenuated down a real signed hop.
+        let human = Ed25519Signer::from_seed([1u8; 32]);
+        let a = Ed25519Signer::from_seed([2u8; 32]);
+        let root_key = human.public_key();
+        let mut root_scope = scope(&[], 10_000, 2);
+        root_scope.permissions = vec![cperm(
+            "payments.charge",
+            vec![
+                Constraint::AmountMax(500),
+                Constraint::ResourceIn(vec!["airlines".into(), "hotels".into()]),
+            ],
+        )];
+        let mut chain = Chain::issue(&human, principal("human:alice"), root_scope);
+        let mut child_scope = scope(&[], 5_000, 1);
+        child_scope.permissions = vec![cperm(
+            "payments.charge",
+            vec![
+                Constraint::AmountMax(300),
+                Constraint::ResourceIn(vec!["airlines".into()]),
+            ],
+        )];
+        chain
+            .attenuate(
+                &human,
+                principal("agent:a@org1"),
+                a.public_key(),
+                child_scope,
+                "book a flight under $3".into(),
+            )
+            .unwrap();
+        assert!(chain.verify(&root_key).is_ok());
     }
 }
