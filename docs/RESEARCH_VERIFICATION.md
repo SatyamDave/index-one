@@ -55,11 +55,11 @@ number is self-reported.**
 
 ## 5. Standards — WIMSE / FIDO / SCITT / RFC 6962 / Visa TAP / MC Agent Pay
 
-- ✳️ **WIMSE** `draft-ietf-wimse-arch` (real WG). **Corrections:** there is **no §3.3.9** and **no R1–R9 requirements list** — both appear fabricated in our docs. Multi-hop is real but lives in **§3.3.8 "AI and ML-Based Intermediaries"** (+ §3.3.4 Delegation/Impersonation), and it is framed **prescriptively** (MUST re-bind per hop), not as an admitted-unsolved gap. Real, citable quote: "a chain of AI-to-AI interactions could unintentionally extend authority far beyond what was originally granted … each hop … MUST explicitly scope and re-bind the security context."
+- ✳️ **WIMSE** `draft-ietf-wimse-arch` (real WG). **Corrections:** there is **no §3.3.9** and **no R1–R9 requirements list** — both appear fabricated in our docs (the real R2/R4 requirements live in `draft-rampalli-cross-org-delegation-mapping-05`, not WIMSE). Multi-hop is real but, in **`draft-ietf-wimse-arch-08` (07 Jul 2026)**, lives in **§3.4.11 "AI and ML-Based Intermediaries"** (+ §3.4.7 Delegation and Impersonation) — these were §3.3.x in earlier revs and **move between revisions, so pin the version every time you cite**. It is framed **prescriptively** (MUST re-bind per hop), not as an admitted-unsolved gap. Real, citable quote (§3.4.11): "a chain of AI-to-AI interactions could unintentionally extend authority far beyond what was originally granted … each hop … MUST explicitly scope and re-bind the security context."
 - ✅ **FIDO Agentic Authentication** TWG (announced 2026-04-28; seeded by AP2 + MC Verifiable Intent). ✅ **SCITT** `draft-ietf-scitt-architecture` — Transparency Service / Signed Statement / Receipt / Registration Policy; a legitimate model to build a witness on. ✅ **RFC 6962** — §2.1.1 inclusion proofs, §2.1.2 consistency proofs (exactly what our `witness` crate implements); gossip discipline stated but deferred to a separate doc.
 - ✅ **Visa TAP** (2025-10-14, with Cloudflare; `github.com/visa/trusted-agent-protocol`) and **Mastercard Agent Pay / Verifiable Intent** (2025-04-29) are real announced rails.
 
-**Opening slide fix:** reframe from "WIMSE names multi-hop cross-org delegation as unsolved (§3.3.9, R1–R9)" to "WIMSE (§3.3.8/§3.3.4) recognizes multi-hop cross-org delegation as a first-order risk and specifies only per-hop re-binding, leaving verifiable end-to-end provenance to implementations" — true, and it motivates a witness layer.
+**Opening slide fix:** reframe from "WIMSE names multi-hop cross-org delegation as unsolved (§3.3.9, R1–R9)" to "WIMSE (§3.4.11/§3.4.7, draft-08) recognizes multi-hop cross-org delegation as a first-order risk and specifies only per-hop re-binding, leaving verifiable end-to-end provenance to implementations" — true, and it motivates a witness layer.
 
 ## 6. Surveys & delegation papers
 
@@ -75,7 +75,7 @@ These are places `REFERENCE.md` / `CLAUDE.md` / positioning are wrong or oversta
 
 1. **AP2 "single-user, not a chain"** → false; AP2 supports tested delegation chains. Reposition the wedge to cross-org completeness/attestation over AP2 chains.
 2. **AP2 "Delegated Trust / Temporal Gaps" as AP2's open problems** → not AP2's; "Temporal Gaps" is third-party (arXiv 2602.06345).
-3. **WIMSE "§3.3.9" and "R1–R9 problem statement"** → do not exist. Cite §3.3.8 / §3.3.4 with the real quote; reframe as "recognized risk, prescriptive-only," not "named as unsolved."
+3. **WIMSE "§3.3.9" and "R1–R9 problem statement"** → do not exist (the real R2/R4 are in `draft-rampalli-cross-org-delegation-mapping-05`, not WIMSE). Cite **§3.4.11 / §3.4.7 of `draft-ietf-wimse-arch-08`** with the real quote; reframe as "recognized risk, prescriptive-only," not "named as unsolved." These section numbers moved from §3.3.x — re-pin on every revision.
 4. **"Every competing draft punts completeness to an external log"** → overstated. True for DRP + EMILIA line; APS mostly self-solves; HDP ignores it; SPICE is unrelated. Drop "every."
 5. **AIP admitted non-goals = "omission/equivocation"** → AIP only concedes self-reported completion. Present omission/equivocation as gaps *we* identify.
 6. **"EP-AEC"** → **EP-AEG** (Action Evidence Graph). The named "cross-binding attack" is unverified — don't quote it.
