@@ -9,6 +9,9 @@ description = "Verification-latency and per-hop-size benchmarks for index-one. C
 # Path deps into /core, ready to wire real benches to once implemented.
 indexone-chain = { path = "../core/chain" }
 indexone-crypto = { path = "../core/crypto" }
+indexone-verifier = { path = "../core/verifier" }
+indexone-witness = { path = "../core/witness" }
+indexone-attestation = { path = "../core/attestation" }
 serde_json = "1"
 
 [dev-dependencies]
@@ -20,4 +23,8 @@ harness = false
 
 [[bench]]
 name = "hop_size"
+harness = false
+
+[[bench]]
+name = "composed_verify"
 harness = false
