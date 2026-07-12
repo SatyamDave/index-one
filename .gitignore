@@ -2,6 +2,9 @@
 /core/target/
 /benchmarks/target/
 /exploits/target/
+/conformance/target/
+# Catch-all so a new crate's build dir can never be committed again.
+**/target/
 **/*.rs.bk
 Cargo.lock.bak
 
