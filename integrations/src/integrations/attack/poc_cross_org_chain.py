@@ -2,6 +2,17 @@
 
 Usage:
     python -m integrations.attack.poc_cross_org_chain
+
+NOTE: this Python POC is illustrative — its "signatures" are tagged strings, not
+real crypto (see ``harness.py``). The **real-crypto** version of this exact
+scenario now lives in the Rust ``/exploits`` crate and runs end-to-end against
+the shipping core:
+
+    cargo run --manifest-path exploits/Cargo.toml --bin ap2_attribution
+
+It shows a single-hop AP2-style mandate (real Ed25519) verifying cleanly while
+index-one rejects the same forged cross-org authority. Prefer that binary for
+any demo; this module remains as a dependency-free, readable sketch of the seam.
 """
 
 from __future__ import annotations
