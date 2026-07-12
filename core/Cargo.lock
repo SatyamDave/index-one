@@ -306,6 +306,8 @@ dependencies = [
  "indexone-attestation",
  "indexone-chain",
  "indexone-crypto",
+ "indexone-revlog",
+ "indexone-revocation",
  "indexone-witness",
  "thiserror",
 ]

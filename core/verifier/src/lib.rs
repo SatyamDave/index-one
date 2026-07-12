@@ -20,11 +20,15 @@
 //! or whose completion was **self-reported**, must return `INVALID` here even
 //! though the chain alone verifies.
 
+use std::collections::BTreeMap;
+
 use indexone_attestation::{
     AttesterRole, CompletionAttestation, ThresholdAttestation, ThresholdError,
 };
 use indexone_chain::{Chain, ChainError, Scope};
 use indexone_crypto::PublicKey;
+use indexone_revlog::{verify_not_revoked, LogBackedProof};
+use indexone_revocation::{revocation_ids_for_chain, RevocationId};
 use indexone_witness::{verify_inclusion, ActionReceipt, Digest};
 
 /// Verifier-set policy for how strong an attestation must be — the piece that
@@ -155,6 +159,12 @@ pub enum VerifyError {
     /// before its signatures are even examined.
     #[error("insufficient attestation: verifier requires {required} independent attesters, presenter declared {declared}")]
     InsufficientAttestation { required: usize, declared: usize },
+    /// A chain hop is not provably unrevoked against the log-backed revocation
+    /// map — either it is listed as revoked, or its non-inclusion proof is
+    /// missing/invalid. Fail closed (CLAUDE.md §11); the revocation analogue of
+    /// [`VerifyError::Omission`].
+    #[error("revoked: a chain hop is not provably unrevoked against the logged revocation map")]
+    Revoked,
 }
 
 /// Verify a cross-org action against a trusted root key and a gossip-trusted
@@ -315,11 +325,80 @@ pub fn verify_threshold(
     Ok(scope)
 }
 
+// ── Step 2b: log-backed revocation non-inclusion ────────────────────────────
+//
+// Revocation is deliberately not folded into `Chain::verify` (freshness is
+// "layered on top" — see `indexone-chain` / `indexone-revocation`), and the
+// composed verifier is the layering point. This is kept as an *additive* gate +
+// opt-in wrappers rather than a new parameter on `verify()`: Rust has no default
+// args, so a new required param would break every call site, and an `Option` that
+// is skipped when `None` would fail *open* — the opposite of the invariant. The
+// wrappers run the gate first, then delegate to the unchanged `verify()`.
+
+/// Log-backed non-revocation evidence: the operator key that signs the revlog
+/// `SignedTreeHead`, plus one [`LogBackedProof`] per chain-hop [`RevocationId`].
+/// The map is keyed by the `RevocationId` bytes (`blake3` of each block's
+/// signature) — the keyless id every party can recompute from the token.
+pub struct RevocationEvidence<'a> {
+    pub log_key: &'a PublicKey,
+    pub proofs: &'a BTreeMap<RevocationId, LogBackedProof>,
+}
+
+/// Step 2b: every hop (root + each delegation) must carry a valid log-backed
+/// proof that its `RevocationId` is **not** revoked. A missing proof, a
+/// malformed id, or a proof that does not verify against the operator-signed,
+/// log-pinned map all fail closed as [`VerifyError::Revoked`] — an unproven hop
+/// is treated as revoked, never waved through.
+pub fn verify_chain_not_revoked(
+    chain: &Chain,
+    evidence: &RevocationEvidence<'_>,
+) -> Result<(), VerifyError> {
+    for id in revocation_ids_for_chain(chain) {
+        let proof = evidence.proofs.get(&id).ok_or(VerifyError::Revoked)?;
+        let key: [u8; 32] =
+            id.0.as_slice()
+                .try_into()
+                .map_err(|_| VerifyError::Revoked)?;
+        if !verify_not_revoked(proof, &key, evidence.log_key) {
+            return Err(VerifyError::Revoked);
+        }
+    }
+    Ok(())
+}
+
+/// [`verify`] preceded by the step-2b revocation gate. Runs the non-revocation
+/// check first (cheap, chain-only) so a revoked hop fails before the more
+/// expensive witness/attestation work.
+pub fn verify_with_revocation(
+    action: &VerifiableAction,
+    root_key: &PublicKey,
+    trusted_root: &Digest,
+    policy: &VerifyPolicy,
+    revocation: &RevocationEvidence<'_>,
+) -> Result<Scope, VerifyError> {
+    verify_chain_not_revoked(&action.chain, revocation)?;
+    verify(action, root_key, trusted_root, policy)
+}
+
+/// [`verify_threshold`] preceded by the step-2b revocation gate.
+pub fn verify_threshold_with_revocation(
+    action: &VerifiableThresholdAction,
+    root_key: &PublicKey,
+    trusted_root: &Digest,
+    required_threshold: usize,
+    policy: &VerifyPolicy,
+    revocation: &RevocationEvidence<'_>,
+) -> Result<Scope, VerifyError> {
+    verify_chain_not_revoked(&action.chain, revocation)?;
+    verify_threshold(action, root_key, trusted_root, required_threshold, policy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use indexone_chain::{Principal, Scope};
     use indexone_crypto::{Ed25519Signer, Signer};
+    use indexone_revlog::LogBackedRevocation;
     use indexone_witness::Witness;
 
     fn principal(id: &str) -> Principal {
@@ -826,6 +905,131 @@ mod tests {
                 have: 1,
                 need: 2,
             })
+        );
+    }
+
+    // ── Step 2b: log-backed revocation gate ─────────────────────────────────
+
+    /// A log operator, distinct from any chain key.
+    fn log_operator() -> Ed25519Signer {
+        Ed25519Signer::from_seed([77u8; 32])
+    }
+
+    /// Build revocation evidence: a fresh log-backed map with `revoked` pulled,
+    /// checkpointed once, then a proof produced for every hop of `chain`. The map
+    /// is keyed by the `RevocationId` bytes, exactly as the verifier derives them.
+    fn evidence_for(
+        chain: &Chain,
+        revoked: &[RevocationId],
+        op: &Ed25519Signer,
+    ) -> BTreeMap<RevocationId, LogBackedProof> {
+        let mut rl = LogBackedRevocation::new();
+        for id in revoked {
+            let key: [u8; 32] = id.0.clone().try_into().unwrap();
+            rl.revoke(key);
+        }
+        rl.publish_checkpoint(op);
+        let mut proofs = BTreeMap::new();
+        for id in revocation_ids_for_chain(chain) {
+            let key: [u8; 32] = id.0.clone().try_into().unwrap();
+            proofs.insert(id, rl.prove(&key, op).unwrap());
+        }
+        proofs
+    }
+
+    /// A full honest action, plus its revocation evidence, ready for the gated
+    /// verify. Returns the pieces so each test can tamper with one.
+    fn honest_with_evidence() -> (World, VerifiableAction, Digest, VerifyPolicy) {
+        let world = build_chain();
+        let action = [42u8; 32];
+        let (receipt, proof, root) = record(&world.chain, action);
+        let completion = CompletionAttestation::attest(
+            &world.notary,
+            principal("attester:notary"),
+            world.chain.digest(),
+            action,
+            action,
+            root,
+            proof,
+        );
+        let policy = trusting(&world);
+        let va = VerifiableAction {
+            chain: world.chain.clone(),
+            action_receipt: receipt,
+            completion,
+        };
+        (world, va, root, policy)
+    }
+
+    /// Happy path: a valid action whose every hop carries a valid non-revocation
+    /// proof passes the gated verify.
+    #[test]
+    fn fresh_chain_passes_the_revocation_gate() {
+        let (world, va, root, policy) = honest_with_evidence();
+        let op = log_operator();
+        let log_key = op.public_key();
+        let proofs = evidence_for(&world.chain, &[], &op);
+        let ev = RevocationEvidence {
+            log_key: &log_key,
+            proofs: &proofs,
+        };
+        assert!(verify_with_revocation(&va, &world.root_key, &root, &policy, &ev).is_ok());
+    }
+
+    /// A revoked middle hop fails closed, even though signatures, witness, and
+    /// attestation are all otherwise valid — the revocation gate catches it.
+    #[test]
+    fn revoked_hop_fails_closed() {
+        let (world, va, root, policy) = honest_with_evidence();
+        let op = log_operator();
+        let log_key = op.public_key();
+        let ids = revocation_ids_for_chain(&world.chain);
+        let proofs = evidence_for(&world.chain, std::slice::from_ref(&ids[2]), &op); // a delegation hop
+        let ev = RevocationEvidence {
+            log_key: &log_key,
+            proofs: &proofs,
+        };
+        assert_eq!(
+            verify_with_revocation(&va, &world.root_key, &root, &policy, &ev).unwrap_err(),
+            VerifyError::Revoked
+        );
+    }
+
+    /// Fail closed on a missing proof: a hop with no non-revocation evidence is
+    /// treated as revoked, never waved through.
+    #[test]
+    fn missing_revocation_proof_fails_closed() {
+        let (world, va, root, policy) = honest_with_evidence();
+        let op = log_operator();
+        let log_key = op.public_key();
+        let mut proofs = evidence_for(&world.chain, &[], &op);
+        let ids = revocation_ids_for_chain(&world.chain);
+        proofs.remove(&ids[0]); // drop the root block's proof
+        let ev = RevocationEvidence {
+            log_key: &log_key,
+            proofs: &proofs,
+        };
+        assert_eq!(
+            verify_with_revocation(&va, &world.root_key, &root, &policy, &ev).unwrap_err(),
+            VerifyError::Revoked
+        );
+    }
+
+    /// A proof set signed by a log key the verifier doesn't trust fails closed:
+    /// the non-inclusion proof doesn't verify under the wrong operator key.
+    #[test]
+    fn wrong_log_key_fails_closed() {
+        let (world, va, root, policy) = honest_with_evidence();
+        let op = log_operator();
+        let proofs = evidence_for(&world.chain, &[], &op);
+        let impostor_key = Ed25519Signer::from_seed([88u8; 32]).public_key();
+        let ev = RevocationEvidence {
+            log_key: &impostor_key,
+            proofs: &proofs,
+        };
+        assert_eq!(
+            verify_with_revocation(&va, &world.root_key, &root, &policy, &ev).unwrap_err(),
+            VerifyError::Revoked
         );
     }
 }
