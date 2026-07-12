@@ -1,0 +1,21 @@
+[package]
+name = "indexone-revocation-http"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "HTTP transport for IndexOne revocation: a minreq-based SnapshotSource that fetches a SignedRevocationSnapshot from a revocation-log URL. Kept out of core so core/revocation stays synchronous and dependency-light."
+
+# Standalone package. minreq is a blocking, no-async, ring-free-by-omission
+# client; we use the plain-HTTP config (terminate TLS at a proxy, like the
+# witness service) — smallest dep tree, `cargo audit` clean.
+[dependencies]
+minreq = { version = "3", default-features = false, features = ["json-using-serde"] }
+indexone-revocation = { path = "../../core/revocation" }
+
+[dev-dependencies]
+indexone-crypto = { path = "../../core/crypto" }
+serde_json = "1"
+
+[lib]
+name = "indexone_revocation_http"
+path = "src/lib.rs"
