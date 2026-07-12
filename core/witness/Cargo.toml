@@ -1,17 +1,16 @@
 [package]
-name = "indexone-chain"
+name = "indexone-witness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Append-only signed delegation-block chain: cryptographically-bound, scope-narrowing capability tokens with cross-org attribution."
+description = "Cross-org transparency log: Merkle roots + inclusion proofs that make action OMISSION detectable. The headline seam (CLAUDE.md §6)."
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
-indexone-crypto = { workspace = true }
 
 [dev-dependencies]

@@ -1,248 +1,563 @@
-//! `indexone-chain` — the append-only signed delegation-block chain.
+//! `indexone-chain` — the append-only, cryptographically-bound delegation chain.
 //!
-//! This is the core object of index-one: a capability token that grows one
-//! signed block per delegation hop.
+//! This is the substrate object of index-one: a capability token that grows
+//! one signed block per delegation hop.
 //!
-//! - **Block 0** is the human root authority: scope, budget, depth limit, and
-//!   expiry, signed by the human principal (or their device key).
-//! - **Block N** (N >= 1) is one agent's delegation to the next agent in the
-//!   chain. Each block may only *narrow* the scope/budget/depth/expiry it
-//!   inherited, must carry the delegating principal's signature, and must
-//!   carry a mandatory `purpose` field — the whole point is that verifying
-//!   Block N tells you not just "was this signed" but "under what stated
-//!   purpose did authority flow here".
+//! - **Block 0** ([`RootBlock`]) is the human root authority: scope, budget,
+//!   depth limit, expiry, signed by the human principal's key.
+//! - **Block N** ([`DelegationBlock`], N ≥ 1) is one agent delegating to the
+//!   next. Each block may only *narrow* the scope/budget/depth/expiry it
+//!   inherited, carries a mandatory `purpose`, and is hash-linked to the block
+//!   before it.
 //!
-//! Verification is local and stateless: everything needed to verify the
-//! chain travels inside the token itself (see the design invariants in
-//! `/docs/REFERENCE.md`). There is no central database and no blockchain —
-//! the token *is* the proof.
+//! **Cross-org binding.** Every block embeds the public key of its signer, and
+//! continuity is cryptographic: block N must be signed by the key that block
+//! N−1 designated as its delegatee (`to_key`). So [`Chain::verify`] against a
+//! trusted root key proves the *entire* chain of authority hop-by-hop back to
+//! Block 0 — across organization boundaries — with no callback and no shared
+//! database. The token is the proof (design invariant #1 in
+//! `/docs/REFERENCE.md`).
 //!
-//! Built on the Biscuit model (biscuit-auth/biscuit): public-key
-//! (`indexone-crypto`) capability tokens with offline attenuation and
-//! datalog-style policies. We differentiate on cross-org attribution: every
-//! hop names the delegating org/agent and the purpose, so Block N can be
-//! traced all the way back to Block 0 across organization boundaries.
-//!
-//! TODO(crypto, @udaya): every operation that touches signing, attenuation
-//! math, or verification is a stub in this file. Fill in real logic behind
-//! these signatures.
+//! What this crate does **not** do: prove the action set was complete
+//! (omission), that the log didn't fork (equivocation), or that completion was
+//! honestly reported. Those are the seams the `witness`, `verifier`, and
+//! `attestation` crates close — see CLAUDE.md §6.
 
-use indexone_crypto::{Algorithm, Signature};
+use indexone_crypto::{verify_signature, PublicKey, Signer};
 use serde::{Deserialize, Serialize};
 
 /// Monotonically narrowing permission envelope carried by every block.
 ///
-/// Invariant: a `DelegationBlock`'s `Scope` must be a subset of the scope it
-/// was delegated from. Scope only narrows down a chain, never widens.
-///
-/// TODO(crypto/chain): decide the concrete scope representation. Likely a
-/// small datalog-ish permission set (à la Biscuit) rather than a flat list,
-/// so scopes can express structured constraints (e.g. "spend <= $X on
-/// category Y before date Z"), not just string tags.
+/// Invariant: a child block's `Scope` must be a subset of the scope it was
+/// delegated from — permissions narrow, budget shrinks, expiry shortens, depth
+/// decreases. Never the reverse. See [`Scope::is_narrowing_of`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
-    /// Opaque permission strings for now (e.g. "payments.charge").
-    /// TODO(crypto/chain): replace with a real structured/datalog scope type.
+    /// Opaque permission strings (e.g. `"payments.charge"`).
+    /// TODO(chain): replace with a structured/datalog scope type so scopes can
+    /// express constraints ("spend ≤ $X on category Y") not just string tags.
     pub permissions: Vec<String>,
-    /// Maximum spend this scope authorizes, in minor units of `currency`.
+    /// Maximum spend authorized, in minor units of `currency`. `None` = the
+    /// scope places no budget ceiling.
     pub budget: Option<u64>,
     pub currency: Option<String>,
     /// Maximum remaining delegation depth (hops) this scope allows.
     pub max_depth: u32,
-    /// Unix timestamp (seconds) after which this scope is no longer valid.
-    /// Expiry may only move earlier down the chain, never later.
+    /// Unix timestamp (seconds) after which this scope is invalid. May only
+    /// move earlier down the chain, never later.
     pub expires_at: u64,
+}
+
+impl Scope {
+    /// Whether `self` is a valid narrowing of `parent`: every permission is
+    /// also in `parent`, the budget is no larger, expiry is no later, and the
+    /// currency (when both budgets are set) matches. Depth is checked
+    /// separately at append time because it must *strictly* decrease.
+    pub fn is_narrowing_of(&self, parent: &Scope) -> Result<(), ChainError> {
+        for perm in &self.permissions {
+            if !parent.permissions.contains(perm) {
+                return Err(ChainError::ScopeWidened);
+            }
+        }
+        match (self.budget, parent.budget) {
+            // Parent bounded, child must be bounded and no larger.
+            (Some(child), Some(parent_budget)) if child > parent_budget => {
+                return Err(ChainError::ScopeWidened)
+            }
+            (None, Some(_)) => return Err(ChainError::ScopeWidened),
+            _ => {}
+        }
+        if self.budget.is_some() && parent.budget.is_some() && self.currency != parent.currency {
+            return Err(ChainError::ScopeWidened);
+        }
+        if self.expires_at > parent.expires_at {
+            return Err(ChainError::ExpiryExtended);
+        }
+        Ok(())
+    }
 }
 
 /// Identifies a principal: a human, or an agent acting for an organization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
-    /// Stable identifier for the principal (DID, org-scoped agent ID, etc).
-    /// TODO(chain): pin down the identity format — likely needs to compose
-    /// with whatever AP2 / MCP / A2A use so cross-rail attribution works.
+    /// Stable identifier (DID, org-scoped agent ID, etc).
+    /// TODO(chain): pin down the identity format so it composes with AP2 / MCP
+    /// / A2A identifiers for cross-rail attribution.
     pub id: String,
-    /// Human-readable org/agent name, for audit trails and debugging.
+    /// Human-readable org/agent name, for audit trails.
     pub display_name: String,
 }
 
-/// Block 0: the human root of authority.
-///
-/// Signed by the human principal (or a device/key acting on their behalf).
-/// Every `DelegationBlock` in the chain must trace back to exactly one of
-/// these.
+/// Block 0: the human root of authority. Every block in the chain traces back
+/// to exactly one of these.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RootBlock {
     pub principal: Principal,
+    /// The root principal's public key — the trust anchor a verifier checks
+    /// the chain against.
+    pub principal_key: PublicKey,
     pub scope: Scope,
-    pub signature: Signature,
+    pub signature: indexone_crypto::Signature,
 }
 
-/// Block N: one agent's signed, scope-narrowing delegation to the next
-/// agent in the chain.
+/// Block N: one agent's signed, scope-narrowing delegation to the next agent.
 ///
-/// The `purpose` field is mandatory — this is what makes the chain useful
-/// for cross-org attribution instead of just cross-org authentication: a
-/// verifier can see not only *that* Org B's agent delegated to Org C's
-/// agent, but *why*.
+/// `purpose` is mandatory — that's what makes the chain useful for
+/// *attribution* (why authority flowed here), not just authentication. The
+/// embedded `from_key`/`to_key` bind the hop cryptographically to its
+/// neighbours (see the module docs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegationBlock {
-    /// The principal delegating authority *from* (must match the previous
-    /// block's `to` principal / the root principal for the first hop).
+    /// Principal delegating authority *from* (must equal the previous block's
+    /// `to` / the root principal for the first hop).
     pub from: Principal,
-    /// The principal authority is delegated *to*.
+    /// Public key of `from`. Must equal the previous block's `to_key` (or the
+    /// root's `principal_key` for the first hop) — this is the cryptographic
+    /// link that stops an unrelated key from splicing itself into the chain.
+    pub from_key: PublicKey,
+    /// Principal authority is delegated *to*.
     pub to: Principal,
-    /// Narrowed scope for this hop. Must be a subset of the previous
-    /// block's scope (see `Chain::attenuate`).
+    /// Public key the delegatee must sign the *next* hop with.
+    pub to_key: PublicKey,
+    /// Narrowed scope for this hop. Must be a subset of the previous scope.
     pub scope: Scope,
-    /// Why this delegation happened. Mandatory: an empty/missing purpose
-    /// makes a block invalid, by design.
+    /// Why this delegation happened. Empty/missing = invalid, by design.
     pub purpose: String,
-    /// Hash of the previous block, binding this block into the chain.
-    /// TODO(crypto/chain): pick the hash function (blake3 likely) and
-    /// canonical encoding used to compute it.
+    /// blake3 hash of the previous block's canonical bytes, binding this block
+    /// into the chain.
     pub prev_block_hash: Vec<u8>,
-    pub signature: Signature,
+    pub signature: indexone_crypto::Signature,
 }
 
-/// A complete capability-token chain: one `RootBlock` plus zero or more
-/// `DelegationBlock`s.
+/// A complete capability-token chain: one [`RootBlock`] plus zero or more
+/// [`DelegationBlock`]s.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chain {
     pub root: RootBlock,
     pub delegations: Vec<DelegationBlock>,
 }
 
-/// Errors returned while building or verifying a chain.
-///
-/// TODO(chain): expand with specific, distinguishable variants (scope
-/// widened, expiry extended, depth exceeded, missing purpose, broken hash
-/// link, signature invalid, algorithm unsupported) so callers can report
-/// *why* a chain failed verification, not just that it did.
-#[derive(Debug, thiserror::Error)]
+/// Errors returned while building or verifying a chain. Each names the exact
+/// property that failed, so a verifier fails closed with a typed reason
+/// (CLAUDE.md §11 conventions).
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ChainError {
-    #[error("not yet implemented: {0}")]
-    NotImplemented(&'static str),
+    #[error("scope widened: a block granted authority its parent did not hold")]
+    ScopeWidened,
+    #[error("expiry extended: a block outlives the authority it was delegated from")]
+    ExpiryExtended,
+    #[error("delegation depth exceeded: no remaining hops were authorized")]
+    DepthExceeded,
+    #[error("missing purpose: delegation blocks must state why authority flowed")]
+    MissingPurpose,
+    #[error("broken hash link: a block does not reference its predecessor")]
+    BrokenHashLink,
+    #[error("signature invalid on block {0}")]
+    SignatureInvalid(usize),
+    #[error("wrong signer: a block was not signed by the key its predecessor delegated to")]
+    WrongSigner,
+    #[error("principal/key mismatch: a block's principal does not match its predecessor")]
+    PrincipalMismatch,
+    #[error("root key mismatch: the chain does not trace to the trusted root key")]
+    RootKeyMismatch,
+    #[error("crypto error: {0}")]
+    Crypto(String),
+}
+
+impl From<indexone_crypto::CryptoError> for ChainError {
+    fn from(e: indexone_crypto::CryptoError) -> Self {
+        ChainError::Crypto(e.to_string())
+    }
+}
+
+/// Canonical bytes a `RootBlock`'s signature covers (everything but the
+/// signature). TODO(crypto): move to RFC 8785 JCS before this is a wire format;
+/// serde_json field order is deterministic here, which is enough for now.
+fn root_signing_payload(principal: &Principal, key: &PublicKey, scope: &Scope) -> Vec<u8> {
+    serde_json::to_vec(&(principal, key, scope)).expect("serializable")
+}
+
+/// Canonical bytes a `DelegationBlock`'s signature covers (everything but the
+/// signature).
+#[allow(clippy::too_many_arguments)]
+fn delegation_signing_payload(
+    from: &Principal,
+    from_key: &PublicKey,
+    to: &Principal,
+    to_key: &PublicKey,
+    scope: &Scope,
+    purpose: &str,
+    prev_block_hash: &[u8],
+) -> Vec<u8> {
+    serde_json::to_vec(&(from, from_key, to, to_key, scope, purpose, prev_block_hash))
+        .expect("serializable")
+}
+
+/// blake3 over a block's full canonical encoding (signature included), used as
+/// the `prev_block_hash` link.
+fn hash_bytes(bytes: &[u8]) -> Vec<u8> {
+    blake3::hash(bytes).as_bytes().to_vec()
+}
+
+fn root_hash(root: &RootBlock) -> Vec<u8> {
+    hash_bytes(&serde_json::to_vec(root).expect("serializable"))
+}
+
+fn delegation_hash(block: &DelegationBlock) -> Vec<u8> {
+    hash_bytes(&serde_json::to_vec(block).expect("serializable"))
 }
 
 impl Chain {
-    /// Start a new chain from a signed human root authority.
-    ///
-    /// TODO(chain): validate `root.signature` against `root.principal`'s
-    /// public key before accepting it (needs a `Verifier` from
-    /// `indexone-crypto`, and a way to resolve principal -> public key).
-    pub fn new(_root: RootBlock) -> Result<Chain, ChainError> {
-        Err(ChainError::NotImplemented("Chain::new"))
+    /// Issue a fresh chain from a human root authority, signing Block 0 with
+    /// `signer` (whose public key becomes the chain's trust anchor).
+    pub fn issue(signer: &dyn Signer, principal: Principal, scope: Scope) -> Chain {
+        let key = signer.public_key();
+        let payload = root_signing_payload(&principal, &key, &scope);
+        let signature = signer.sign(&payload).expect("sign root");
+        Chain {
+            root: RootBlock {
+                principal,
+                principal_key: key,
+                scope,
+                signature,
+            },
+            delegations: Vec::new(),
+        }
     }
 
-    /// Append a new delegation hop, narrowing scope from the current tail
-    /// of the chain and signing it with `signer`.
+    /// Adopt an already-signed root block, checking its signature first.
+    pub fn from_root(root: RootBlock) -> Result<Chain, ChainError> {
+        let payload = root_signing_payload(&root.principal, &root.principal_key, &root.scope);
+        if !verify_signature(&payload, &root.signature, &root.principal_key)? {
+            return Err(ChainError::SignatureInvalid(0));
+        }
+        Ok(Chain {
+            root,
+            delegations: Vec::new(),
+        })
+    }
+
+    /// Scope and signing key at the current tail of the chain — what the next
+    /// hop must narrow from and be signed under.
+    fn tail(&self) -> (&Scope, &PublicKey, &Principal, Vec<u8>) {
+        match self.delegations.last() {
+            None => (
+                &self.root.scope,
+                &self.root.principal_key,
+                &self.root.principal,
+                root_hash(&self.root),
+            ),
+            Some(last) => (&last.scope, &last.to_key, &last.to, delegation_hash(last)),
+        }
+    }
+
+    /// Append a delegation hop, narrowing scope from the current tail and
+    /// signing it with `signer`.
     ///
-    /// Enforces (once implemented) the core chain invariants:
-    /// - `new_scope` must be a subset of the current tail scope (never wider).
-    /// - `new_scope.expires_at` must be <= the current tail's expiry.
-    /// - `new_scope.max_depth` must be strictly less than the current tail's,
-    ///   and the chain must reject the append once depth reaches zero.
-    /// - `purpose` must be non-empty.
-    ///
-    /// TODO(chain, @udaya): implement narrowing checks + signing via a
-    /// `indexone_crypto::Signer`. This is the heart of "attenuation".
+    /// `signer` must be the key the current tail delegated to (the root key for
+    /// the first hop, else the previous block's `to_key`) — this is what makes
+    /// the appended chain verifiable end-to-end. Enforces the attenuation
+    /// invariants: scope subset, expiry no later, depth strictly decreasing
+    /// (and > 0), purpose non-empty.
     pub fn attenuate(
         &mut self,
-        _to: Principal,
-        _new_scope: Scope,
-        _purpose: String,
-        _algorithm: Algorithm,
+        signer: &dyn Signer,
+        to: Principal,
+        to_key: PublicKey,
+        new_scope: Scope,
+        purpose: String,
     ) -> Result<(), ChainError> {
-        Err(ChainError::NotImplemented("Chain::attenuate"))
+        if purpose.trim().is_empty() {
+            return Err(ChainError::MissingPurpose);
+        }
+        let (tail_scope, tail_key, _tail_principal, prev_hash) = self.tail();
+        if signer.public_key() != *tail_key {
+            return Err(ChainError::WrongSigner);
+        }
+        if tail_scope.max_depth == 0 {
+            return Err(ChainError::DepthExceeded);
+        }
+        new_scope.is_narrowing_of(tail_scope)?;
+        if new_scope.max_depth >= tail_scope.max_depth {
+            return Err(ChainError::ScopeWidened);
+        }
+
+        let from_principal = _tail_principal.clone();
+        let from_key = tail_key.clone();
+        let payload = delegation_signing_payload(
+            &from_principal,
+            &from_key,
+            &to,
+            &to_key,
+            &new_scope,
+            &purpose,
+            &prev_hash,
+        );
+        let signature = signer.sign(&payload)?;
+        self.delegations.push(DelegationBlock {
+            from: from_principal,
+            from_key,
+            to,
+            to_key,
+            scope: new_scope,
+            purpose,
+            prev_block_hash: prev_hash,
+            signature,
+        });
+        Ok(())
     }
 
-    /// Verify the entire chain: every block's signature, every hash link,
-    /// and every attenuation invariant (scope only narrows, expiry only
-    /// shortens, depth only decreases, purpose present).
+    /// Verify the entire chain against a trusted root key: every signature,
+    /// every hash link, cryptographic hop-to-hop continuity, and every
+    /// attenuation invariant. Returns the effective (narrowest) [`Scope`] the
+    /// final hop is authorized for.
     ///
-    /// This must be a pure function of the token's own bytes — no network
-    /// call, no shared database lookup — that's the "local, stateless,
-    /// per-request" property. (Revocation freshness, which *does* need an
-    /// out-of-band check, is layered on top via `indexone-revocation`, not
-    /// folded into this call.)
-    ///
-    /// TODO(chain, @udaya): implement. Should return the effective
-    /// (narrowest) `Scope` on success so callers know what the final hop is
-    /// actually authorized to do.
-    pub fn verify(&self) -> Result<Scope, ChainError> {
-        Err(ChainError::NotImplemented("Chain::verify"))
+    /// Pure function of the token's own bytes — no network, no shared database.
+    /// Revocation freshness (which *does* need an out-of-band check) is layered
+    /// on top via `indexone-revocation`, not folded in here.
+    pub fn verify(&self, root_key: &PublicKey) -> Result<Scope, ChainError> {
+        if self.root.principal_key != *root_key {
+            return Err(ChainError::RootKeyMismatch);
+        }
+        let root_payload = root_signing_payload(
+            &self.root.principal,
+            &self.root.principal_key,
+            &self.root.scope,
+        );
+        if !verify_signature(
+            &root_payload,
+            &self.root.signature,
+            &self.root.principal_key,
+        )? {
+            return Err(ChainError::SignatureInvalid(0));
+        }
+
+        let mut prev_scope = &self.root.scope;
+        let mut expected_signer_key = &self.root.principal_key;
+        let mut expected_from = &self.root.principal;
+        let mut prev_hash = root_hash(&self.root);
+
+        for (i, block) in self.delegations.iter().enumerate() {
+            let block_index = i + 1;
+            // Cryptographic continuity: this block must be signed by the key the
+            // previous hop delegated to, by the principal it named.
+            if block.from_key != *expected_signer_key {
+                return Err(ChainError::WrongSigner);
+            }
+            if block.from != *expected_from {
+                return Err(ChainError::PrincipalMismatch);
+            }
+            if block.prev_block_hash != prev_hash {
+                return Err(ChainError::BrokenHashLink);
+            }
+            if block.purpose.trim().is_empty() {
+                return Err(ChainError::MissingPurpose);
+            }
+            // Attenuation invariants.
+            if prev_scope.max_depth == 0 {
+                return Err(ChainError::DepthExceeded);
+            }
+            block.scope.is_narrowing_of(prev_scope)?;
+            if block.scope.max_depth >= prev_scope.max_depth {
+                return Err(ChainError::ScopeWidened);
+            }
+            // Signature.
+            let payload = delegation_signing_payload(
+                &block.from,
+                &block.from_key,
+                &block.to,
+                &block.to_key,
+                &block.scope,
+                &block.purpose,
+                &block.prev_block_hash,
+            );
+            if !verify_signature(&payload, &block.signature, &block.from_key)? {
+                return Err(ChainError::SignatureInvalid(block_index));
+            }
+
+            prev_scope = &block.scope;
+            expected_signer_key = &block.to_key;
+            expected_from = &block.to;
+            prev_hash = delegation_hash(block);
+        }
+
+        Ok(prev_scope.clone())
+    }
+
+    /// blake3 digest of the whole chain's canonical bytes — a stable identifier
+    /// for "the authority this action ran under", committed to by witness
+    /// receipts and completion attestations.
+    pub fn digest(&self) -> [u8; 32] {
+        *blake3::hash(&serde_json::to_vec(self).expect("serializable")).as_bytes()
+    }
+
+    /// The public key of the agent at the end of the chain — the party that
+    /// actually executes the final action. A completion attestation signed by
+    /// *this* key is self-reported (not independent); the verifier rejects it.
+    pub fn executor_key(&self) -> &PublicKey {
+        match self.delegations.last() {
+            Some(last) => &last.to_key,
+            None => &self.root.principal_key,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexone_crypto::Ed25519Signer;
 
-    fn sample_principal(id: &str) -> Principal {
+    fn principal(id: &str) -> Principal {
         Principal {
             id: id.to_string(),
             display_name: id.to_string(),
         }
     }
 
-    fn sample_scope() -> Scope {
+    fn scope(perms: &[&str], budget: u64, depth: u32) -> Scope {
         Scope {
-            permissions: vec!["payments.charge".to_string()],
-            budget: Some(10_000),
+            permissions: perms.iter().map(|s| s.to_string()).collect(),
+            budget: Some(budget),
             currency: Some("USD".to_string()),
-            max_depth: 3,
-            expires_at: 4_102_444_800, // 2100-01-01, arbitrary far future
+            max_depth: depth,
+            expires_at: 4_102_444_800,
         }
     }
 
-    /// Scaffold-level test: the data structures for Block 0 / Block N
-    /// construct and hold the fields the spec requires (scope, budget,
-    /// depth, expiry on the root; scope-narrowing + mandatory purpose on
-    /// delegation blocks). Does NOT exercise real signing/verification.
-    #[test]
-    fn root_block_carries_required_fields() {
-        let root = RootBlock {
-            principal: sample_principal("human:alice"),
-            scope: sample_scope(),
-            signature: Signature {
-                algorithm: Algorithm::Ed25519,
-                bytes: vec![],
-            },
-        };
-        assert_eq!(root.scope.max_depth, 3);
-        assert!(root.scope.expires_at > 0);
+    /// Build the canonical happy-path 3-hop cross-org chain:
+    /// Human → Agent A (org1) → Agent B (org2) → Agent C (org3).
+    fn three_hop() -> (Chain, PublicKey) {
+        let human = Ed25519Signer::from_seed([1u8; 32]);
+        let a = Ed25519Signer::from_seed([2u8; 32]);
+        let b = Ed25519Signer::from_seed([3u8; 32]);
+        let c = Ed25519Signer::from_seed([4u8; 32]);
+        let root_key = human.public_key();
+
+        let mut chain = Chain::issue(
+            &human,
+            principal("human:alice"),
+            scope(&["payments.charge"], 10_000, 3),
+        );
+        chain
+            .attenuate(
+                &human,
+                principal("agent:a@org1"),
+                a.public_key(),
+                scope(&["payments.charge"], 5_000, 2),
+                "book travel under $50".into(),
+            )
+            .unwrap();
+        chain
+            .attenuate(
+                &a,
+                principal("agent:b@org2"),
+                b.public_key(),
+                scope(&["payments.charge"], 5_000, 1),
+                "charge the airline".into(),
+            )
+            .unwrap();
+        chain
+            .attenuate(
+                &b,
+                principal("agent:c@org3"),
+                c.public_key(),
+                scope(&["payments.charge"], 4_000, 0),
+                "settle fare".into(),
+            )
+            .unwrap();
+        (chain, root_key)
     }
 
     #[test]
-    fn delegation_block_purpose_is_a_required_field() {
-        let block = DelegationBlock {
-            from: sample_principal("agent:a@org1"),
-            to: sample_principal("agent:b@org2"),
-            scope: sample_scope(),
-            purpose: "book a flight under $500".to_string(),
-            prev_block_hash: vec![0u8; 32],
-            signature: Signature {
-                algorithm: Algorithm::Ed25519,
-                bytes: vec![],
-            },
-        };
-        assert!(!block.purpose.is_empty());
+    fn valid_three_hop_chain_verifies() {
+        let (chain, root_key) = three_hop();
+        let effective = chain.verify(&root_key).unwrap();
+        assert_eq!(effective.budget, Some(4_000));
+        assert_eq!(effective.max_depth, 0);
     }
 
     #[test]
-    fn verify_is_unimplemented_stub() {
-        let chain = Chain {
-            root: RootBlock {
-                principal: sample_principal("human:alice"),
-                scope: sample_scope(),
-                signature: Signature {
-                    algorithm: Algorithm::Ed25519,
-                    bytes: vec![],
-                },
-            },
-            delegations: vec![],
-        };
-        let err = chain.verify().unwrap_err();
-        assert!(matches!(err, ChainError::NotImplemented(_)));
+    fn widening_scope_is_rejected() {
+        // Claim targets invariant #2 (scope only narrows). A hop that tries to
+        // grant a permission its parent never held must fail closed.
+        let a = Ed25519Signer::from_seed([2u8; 32]);
+        let human = Ed25519Signer::from_seed([1u8; 32]);
+        let mut chain = Chain::issue(
+            &human,
+            principal("human:alice"),
+            scope(&["payments.charge"], 10_000, 2),
+        );
+        let err = chain
+            .attenuate(
+                &human,
+                principal("agent:a@org1"),
+                a.public_key(),
+                scope(&["payments.charge", "payments.refund"], 10_000, 1),
+                "grab extra authority".into(),
+            )
+            .unwrap_err();
+        assert_eq!(err, ChainError::ScopeWidened);
+    }
+
+    #[test]
+    fn empty_purpose_is_rejected() {
+        let human = Ed25519Signer::from_seed([1u8; 32]);
+        let a = Ed25519Signer::from_seed([2u8; 32]);
+        let mut chain = Chain::issue(
+            &human,
+            principal("human:alice"),
+            scope(&["payments.charge"], 10_000, 2),
+        );
+        let err = chain
+            .attenuate(
+                &human,
+                principal("agent:a@org1"),
+                a.public_key(),
+                scope(&["payments.charge"], 5_000, 1),
+                "   ".into(),
+            )
+            .unwrap_err();
+        assert_eq!(err, ChainError::MissingPurpose);
+    }
+
+    #[test]
+    fn wrong_signer_cannot_extend_chain() {
+        // A key the previous hop never delegated to must not be able to append.
+        let human = Ed25519Signer::from_seed([1u8; 32]);
+        let a = Ed25519Signer::from_seed([2u8; 32]);
+        let impostor = Ed25519Signer::from_seed([99u8; 32]);
+        let mut chain = Chain::issue(
+            &human,
+            principal("human:alice"),
+            scope(&["payments.charge"], 10_000, 2),
+        );
+        let err = chain
+            .attenuate(
+                &impostor,
+                principal("agent:a@org1"),
+                a.public_key(),
+                scope(&["payments.charge"], 5_000, 1),
+                "splice in".into(),
+            )
+            .unwrap_err();
+        assert_eq!(err, ChainError::WrongSigner);
+    }
+
+    #[test]
+    fn tampered_scope_after_signing_fails_verification() {
+        // Mutating a signed block's scope must break its signature.
+        let (mut chain, root_key) = three_hop();
+        chain.delegations[1].scope.budget = Some(9_999);
+        assert!(chain.verify(&root_key).is_err());
+    }
+
+    #[test]
+    fn wrong_root_key_is_rejected() {
+        let (chain, _) = three_hop();
+        let attacker = Ed25519Signer::from_seed([250u8; 32]);
+        assert_eq!(
+            chain.verify(&attacker.public_key()).unwrap_err(),
+            ChainError::RootKeyMismatch
+        );
     }
 }

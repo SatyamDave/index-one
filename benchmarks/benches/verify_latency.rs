@@ -1,82 +1,60 @@
 //! Verification-latency benchmark.
 //!
-//! Target (per AIP's published numbers, which we're matching): sub-millisecond
-//! chain verification.
+//! Target (per AIP's published numbers, which we're matching — reproduce before
+//! quoting, CLAUDE.md directive 5): sub-millisecond chain verification.
 //!
-//! TODO(@udaya): once `indexone_chain::Chain::verify` is implemented, replace
-//! `placeholder_verify` below with a real call to it, benchmarked over chains
-//! of varying hop count (1, 3, 5, 10 hops) to see how verification time scales
-//! with chain depth.
+//! Benchmarks the real `indexone_chain::Chain::verify` over chains of varying
+//! hop count to see how verification time scales with delegation depth.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use indexone_chain::{Chain, DelegationBlock, Principal, RootBlock, Scope};
-use indexone_crypto::{Algorithm, Signature};
+use indexone_chain::{Chain, Principal, Scope};
+use indexone_crypto::{Ed25519Signer, PublicKey, Signer};
 
-fn sample_scope() -> Scope {
+fn principal(id: &str) -> Principal {
+    Principal {
+        id: id.to_string(),
+        display_name: id.to_string(),
+    }
+}
+
+fn scope(depth: u32) -> Scope {
     Scope {
         permissions: vec!["payments.charge".to_string()],
         budget: Some(10_000),
         currency: Some("USD".to_string()),
-        max_depth: 3,
+        max_depth: depth,
         expires_at: 4_102_444_800,
     }
 }
 
-fn sample_chain(hops: usize) -> Chain {
-    let root = RootBlock {
-        principal: Principal {
-            id: "human:alice".to_string(),
-            display_name: "Alice".to_string(),
-        },
-        scope: sample_scope(),
-        signature: Signature {
-            algorithm: Algorithm::Ed25519,
-            bytes: vec![0u8; 64],
-        },
-    };
+/// Build a valid `hops`-deep chain and return it alongside its trust anchor.
+fn sample_chain(hops: u32) -> (Chain, PublicKey) {
+    let human = Ed25519Signer::from_seed([1u8; 32]);
+    let root_key = human.public_key();
+    let mut chain = Chain::issue(&human, principal("human:alice"), scope(hops));
 
-    let delegations = (0..hops)
-        .map(|i| DelegationBlock {
-            from: Principal {
-                id: format!("agent:{i}@org{i}"),
-                display_name: format!("agent-{i}"),
-            },
-            to: Principal {
-                id: format!("agent:{}@org{}", i + 1, i + 1),
-                display_name: format!("agent-{}", i + 1),
-            },
-            scope: sample_scope(),
-            purpose: "benchmark placeholder hop".to_string(),
-            prev_block_hash: vec![0u8; 32],
-            signature: Signature {
-                algorithm: Algorithm::Ed25519,
-                bytes: vec![0u8; 64],
-            },
-        })
-        .collect();
-
-    Chain { root, delegations }
-}
-
-/// Placeholder for `Chain::verify`. `Chain::verify` is currently a `todo!()`
-/// stub (see `indexone_chain::ChainError::NotImplemented`), so benchmarking
-/// it directly would just measure an early return. This walks the chain's
-/// blocks the way a real verifier eventually will (touching every block
-/// once), so the benchmark harness's shape is already right -- swap the body
-/// for a real call once `Chain::verify` exists.
-fn placeholder_verify(chain: &Chain) -> bool {
-    black_box(&chain.root.signature.bytes);
-    for block in &chain.delegations {
-        black_box(&block.signature.bytes);
+    let mut current: Box<dyn Signer> = Box::new(Ed25519Signer::from_seed([1u8; 32]));
+    for i in 0..hops {
+        let next = Ed25519Signer::from_seed([(i + 2) as u8; 32]);
+        chain
+            .attenuate(
+                current.as_ref(),
+                principal(&format!("agent:{i}@org{i}")),
+                next.public_key(),
+                scope(hops - i - 1),
+                format!("delegation hop {i}"),
+            )
+            .expect("attenuate");
+        current = Box::new(next);
     }
-    !chain.root.scope.permissions.is_empty()
+    (chain, root_key)
 }
 
 fn bench_verify(c: &mut Criterion) {
-    for hops in [1usize, 3, 5, 10] {
-        let chain = sample_chain(hops);
-        c.bench_function(&format!("verify_placeholder/{hops}_hops"), |b| {
-            b.iter(|| placeholder_verify(black_box(&chain)))
+    for hops in [1u32, 3, 5, 10] {
+        let (chain, root_key) = sample_chain(hops);
+        c.bench_function(&format!("verify/{hops}_hops"), |b| {
+            b.iter(|| black_box(&chain).verify(black_box(&root_key)).unwrap())
         });
     }
 }

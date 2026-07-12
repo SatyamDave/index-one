@@ -1,6 +1,25 @@
 [workspace]
 resolver = "2"
-members = ["chain", "crypto", "revocation"]
+# Crates are grouped by the architecture in CLAUDE.md §6 and docs/REFERENCE.md:
+#
+#   SUBSTRATE (integrate/extend, do not reinvent) — the per-hop primitive:
+#     crypto       signature agility (Ed25519 now, ML-DSA/hybrid later)
+#     chain        append-only signed delegation blocks (cross-org attribution)
+#     revocation   short-TTL + transparency-log revocation (adjacent)
+#
+#   OUR LAYER (what the competing drafts explicitly punt — the company):
+#     witness      cross-org transparency log: Merkle roots, inclusion proofs
+#                  (makes OMISSION detectable — the headline seam)
+#     attestation  independent completion attestation (replaces self-report)
+#     verifier     the composed verify() algorithm; fail-closed
+members = [
+    "crypto",
+    "chain",
+    "revocation",
+    "witness",
+    "attestation",
+    "verifier",
+]
 
 [workspace.package]
 version = "0.0.1"
@@ -11,4 +30,15 @@ publish = false           # not ready to publish to crates.io yet
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "1"
+blake3 = "1"
+ed25519-dalek = "2"
+getrandom = "0.2"
+hex = "0.4"
+
+# Internal crates (referenced by path so downstream crates share versions).
+indexone-crypto = { path = "crypto" }
+indexone-chain = { path = "chain" }
+indexone-witness = { path = "witness" }
+indexone-attestation = { path = "attestation" }

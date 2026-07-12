@@ -1,0 +1,17 @@
+[package]
+name = "indexone-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "The composed verify() algorithm: chain + witness completeness + independent attestation, fail-closed. The Day-12 kill test lives here (CLAUDE.md §6, §9)."
+
+[dependencies]
+thiserror.workspace = true
+indexone-crypto = { workspace = true }
+indexone-chain = { workspace = true }
+indexone-witness = { workspace = true }
+indexone-attestation = { path = "../attestation" }
+
+[dev-dependencies]

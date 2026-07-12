@@ -1,61 +1,67 @@
 //! Per-hop-size benchmark.
 //!
-//! Target (matching AIP's published numbers): ~340-380 bytes per delegation
-//! hop on the wire.
+//! Target (matching AIP's published numbers — reproduce before quoting): a
+//! compact per-hop wire size. This measures the *current* encoding
+//! (deterministic serde_json + real Ed25519 signatures + embedded public keys).
 //!
-//! TODO(@udaya): once real Ed25519 signatures (64 bytes) and a canonical
-//! binary encoding (likely not serde_json -- probably bincode or a
-//! hand-rolled compact encoding) are in place, re-measure with those. This
-//! currently uses serde_json purely as a placeholder encoding to get a
-//! runnable benchmark harness shape in place early; JSON is NOT the intended
-//! wire format.
+//! NOTE: serde_json is NOT the intended wire format — it's the canonical
+//! encoding we sign over today (RFC 8785 JCS is the target). A compact binary
+//! encoding (bincode / hand-rolled) will shrink these numbers; this bench
+//! exists to track where we actually are, honestly, as the encoding evolves.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use indexone_chain::{DelegationBlock, Principal, Scope};
-use indexone_crypto::{Algorithm, Signature};
+use indexone_chain::{Chain, Principal, Scope};
+use indexone_crypto::{Ed25519Signer, Signer};
 
-fn sample_delegation_block() -> DelegationBlock {
-    DelegationBlock {
-        from: Principal {
-            id: "agent:a@org1".to_string(),
-            display_name: "agent-a".to_string(),
-        },
-        to: Principal {
-            id: "agent:b@org2".to_string(),
-            display_name: "agent-b".to_string(),
-        },
-        scope: Scope {
-            permissions: vec!["payments.charge".to_string()],
-            budget: Some(10_000),
-            currency: Some("USD".to_string()),
-            max_depth: 2,
-            expires_at: 4_102_444_800,
-        },
-        purpose: "book a flight under $500".to_string(),
-        prev_block_hash: vec![0u8; 32],
-        signature: Signature {
-            algorithm: Algorithm::Ed25519,
-            bytes: vec![0u8; 64],
-        },
+fn principal(id: &str) -> Principal {
+    Principal {
+        id: id.to_string(),
+        display_name: id.to_string(),
     }
 }
 
-fn bench_hop_size(c: &mut Criterion) {
-    let block = sample_delegation_block();
+fn scope(depth: u32) -> Scope {
+    Scope {
+        permissions: vec!["payments.charge".to_string()],
+        budget: Some(10_000),
+        currency: Some("USD".to_string()),
+        max_depth: depth,
+        expires_at: 4_102_444_800,
+    }
+}
 
-    c.bench_function("serialize_delegation_block_json_placeholder", |b| {
+/// A one-hop chain: root + a single real, signed delegation block.
+fn one_hop_chain() -> Chain {
+    let human = Ed25519Signer::from_seed([1u8; 32]);
+    let agent = Ed25519Signer::from_seed([2u8; 32]);
+    let mut chain = Chain::issue(&human, principal("human:alice"), scope(1));
+    chain
+        .attenuate(
+            &human,
+            principal("agent:a@org1"),
+            agent.public_key(),
+            scope(0),
+            "book a flight under $500".into(),
+        )
+        .expect("attenuate");
+    chain
+}
+
+fn bench_hop_size(c: &mut Criterion) {
+    let chain = one_hop_chain();
+    let block = &chain.delegations[0];
+
+    c.bench_function("serialize_delegation_block_json", |b| {
         b.iter(|| {
-            let bytes = serde_json::to_vec(black_box(&block)).expect("serialize");
+            let bytes = serde_json::to_vec(black_box(block)).expect("serialize");
             black_box(bytes.len())
         })
     });
 
-    // Not a criterion measurement -- just surfaces the current placeholder
-    // size so `cargo bench` output shows how far off the ~340-380 byte
-    // target we are with the placeholder (JSON, zeroed signature) encoding.
-    let size = serde_json::to_vec(&block).expect("serialize").len();
+    let size = serde_json::to_vec(block).expect("serialize").len();
     println!(
-        "placeholder JSON-encoded DelegationBlock size: {size} bytes (target once real: ~340-380 bytes/hop, compact encoding)"
+        "current JSON-encoded DelegationBlock size: {size} bytes \
+         (real Ed25519 sig + embedded keys; target: compact binary encoding)"
     );
 }
 
