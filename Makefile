@@ -18,7 +18,7 @@ CARGO       := cargo
 PYTHON      := python3
 
 .DEFAULT_GOAL := help
-.PHONY: help reproduce build test exploits conformance sidebyside py-test deps-python require-real clean fmt lint
+.PHONY: help reproduce build test exploits conformance sidebyside demo py-test deps-python require-real clean fmt lint
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -51,6 +51,10 @@ sidebyside: ## Real-upstream side-by-sides (AIP: real SDK if installed; AP2: fai
 	$(PYTHON) exploits/real_ap2/sidebyside.py
 	@echo ">> real AIP reference SDK vs IndexOne (soft-skips if SDK not installed)"
 	$(PYTHON) exploits/real_aip/sidebyside.py
+
+demo: ## End-to-end demo: cross-org chain → witness → composed verify (catches omission + self-report) + live witness service
+	$(CARGO) build --manifest-path $(CORE) -p indexone-cli
+	INDEXONE_CLI=$$(pwd)/core/target/debug/indexone-cli PYTHONPATH=sdk/python/src $(PYTHON) demos/e2e_demo.py
 
 py-test: ## Run the Python integrations test suite
 	cd $(INTEGRATIONS) && PYTHONPATH=src $(PYTHON) -m pytest -q
