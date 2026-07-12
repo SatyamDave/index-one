@@ -7,13 +7,28 @@ is skipped otherwise so CI passes without a built Rust binary.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 
 import pytest
 
 import indexone
-from indexone import Client, IndexOneError, Principal, Scope, attenuate, issue, verify, wrap
+from indexone import (
+    Client,
+    IndexOneError,
+    Principal,
+    Scope,
+    attenuate,
+    attest,
+    chain_digest,
+    composed_verify,
+    issue,
+    pubkey,
+    verify,
+    witness_append,
+    wrap,
+)
 
 FAR_FUTURE = 4_102_444_800
 
@@ -95,8 +110,146 @@ def test_verify_rejects_wrong_root_key_fails_closed() -> None:
 
 
 def test_public_surface_exported() -> None:
-    for name in ("Client", "wrap", "issue", "attenuate", "verify", "Scope", "Principal"):
+    for name in (
+        "Client",
+        "wrap",
+        "issue",
+        "attenuate",
+        "verify",
+        "Scope",
+        "Principal",
+        "pubkey",
+        "chain_digest",
+        "witness_append",
+        "attest",
+        "composed_verify",
+    ):
         assert hasattr(indexone, name)
+
+
+def _three_hop_chain() -> tuple[dict, dict, str]:
+    """Human -> A@org1 -> B@org2 -> C@org3 (executor). Returns (chain, root_key,
+    chain_digest_hex)."""
+    seed = lambda b: bytes([b] * 32).hex()  # noqa: E731
+    issued = issue(
+        seed(1),
+        Principal("human:alice", "Alice"),
+        Scope(
+            ["payments.charge"], max_depth=3, expires_at=FAR_FUTURE, budget=10_000, currency="USD"
+        ),
+    )
+    chain, root_key = issued["chain"], issued["root_key"]
+    for signer_b, to_b, to_id, depth in [
+        (1, 2, "agent:a@org1", 2),
+        (2, 3, "agent:b@org2", 1),
+        (3, 4, "agent:c@org3", 0),
+    ]:
+        chain = attenuate(
+            chain,
+            seed(signer_b),
+            Principal(to_id, to_id),
+            seed(to_b),
+            Scope(
+                ["payments.charge"],
+                max_depth=depth,
+                expires_at=FAR_FUTURE,
+                budget=4_000,
+                currency="USD",
+            ),
+            f"hop to {to_id}",
+        )["chain"]
+    return chain, root_key, chain_digest(chain)
+
+
+@pytest.mark.skipif(not _cli_available(), reason="indexone-cli not built")
+def test_full_surface_honest_action_verifies() -> None:
+    # The whole product surface from Python: chain -> witnessed action ->
+    # independent attestation -> composed verify() == VALID.
+    chain, root_key, cd = _three_hop_chain()
+    action = hashlib.sha256(b"charge $40").hexdigest()
+    nonce = hashlib.sha256(b"nonce-1").hexdigest()
+    notary_key = pubkey("09" * 32)
+
+    w = witness_append(cd, action, nonce)
+    completion = attest(
+        "09" * 32,
+        Principal("attester:notary", "Notary"),
+        cd,
+        action,
+        action,
+        w["root"],
+        w["inclusion_proof"],
+    )
+    effective = composed_verify(
+        chain,
+        root_key,
+        w["root"],
+        w["receipt"],
+        completion,
+        trusted_attesters=[notary_key],
+    )
+    assert effective.budget == 4_000
+
+
+@pytest.mark.skipif(not _cli_available(), reason="indexone-cli not built")
+def test_omitted_action_is_invalid_through_sdk() -> None:
+    # The Day-12 lead case, end to end in Python: an action never witnessed,
+    # presented against the honest root, fails closed as an omission.
+    chain, root_key, cd = _three_hop_chain()
+    honest = hashlib.sha256(b"charge $40").hexdigest()
+    nonce = hashlib.sha256(b"nonce-1").hexdigest()
+    notary_key = pubkey("09" * 32)
+
+    w = witness_append(cd, honest, nonce)  # only the honest action is witnessed
+    omitted = hashlib.sha256(b"secret $9000").hexdigest()
+    omitted_receipt = witness_append(cd, omitted, nonce)["receipt"]  # in a throwaway log
+    completion = attest(
+        "09" * 32,
+        Principal("attester:notary", "Notary"),
+        cd,
+        omitted,
+        omitted,
+        w["root"],
+        w["inclusion_proof"],  # honest root/proof, but the receipt is the omitted one
+    )
+    with pytest.raises(IndexOneError, match="omission"):
+        composed_verify(
+            chain,
+            root_key,
+            w["root"],
+            omitted_receipt,
+            completion,
+            trusted_attesters=[notary_key],
+        )
+
+
+@pytest.mark.skipif(not _cli_available(), reason="indexone-cli not built")
+def test_self_reported_completion_is_invalid_through_sdk() -> None:
+    # The executor (C) attests its own work -> not independent -> INVALID.
+    chain, root_key, cd = _three_hop_chain()
+    action = hashlib.sha256(b"charge $40").hexdigest()
+    nonce = hashlib.sha256(b"nonce-1").hexdigest()
+    c_key = pubkey("04" * 32)  # C's key (the executor)
+
+    w = witness_append(cd, action, nonce)
+    self_report = attest(
+        "04" * 32,
+        Principal("agent:c@org3", "C"),
+        cd,
+        action,
+        action,
+        w["root"],
+        w["inclusion_proof"],
+    )
+    with pytest.raises(IndexOneError):
+        composed_verify(
+            chain,
+            root_key,
+            w["root"],
+            w["receipt"],
+            self_report,
+            trusted_attesters=[c_key],
+        )
 
 
 def _perm(action, *, amount_max=None, resource_in=None):  # type: ignore[no-untyped-def]

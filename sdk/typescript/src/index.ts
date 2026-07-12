@@ -126,6 +126,108 @@ export function verify(chain: Chain, rootKey: PublicKey): Scope {
   return resp["effective_scope"] as Scope;
 }
 
+// ── Witness · attestation · composed verify — the full §6 product surface ────
+//
+// These reach past the delegation chain to the three deliverables the competing
+// drafts punt: a witnessed action (completeness/omission), an independent
+// completion attestation (not self-reported), and the composed fail-closed
+// verify(). Receipts / proofs / attestations are opaque JSON threaded between
+// calls; digests are lowercase hex.
+
+/** Opaque JSON forms of the witness/attestation serde types. */
+export type Receipt = Record<string, unknown>;
+export type InclusionProof = Record<string, unknown>;
+export type Completion = Record<string, unknown>;
+
+/** Derive a public key from a 32-byte hex seed — e.g. to name a trusted attester
+ *  in a {@link composedVerify} policy without issuing a chain. */
+export function pubkey(seedHex: string): PublicKey {
+  return invoke({ cmd: "pubkey", seed: seedHex })["public_key"] as PublicKey;
+}
+
+/** The content digest of a chain (hex) — what receipts and attestations bind to. */
+export function chainDigest(chain: Chain): string {
+  return invoke({ cmd: "chain_digest", chain })["digest"] as string;
+}
+
+/** Append an action receipt to the transparency witness. Returns the receipt, the
+ *  updated `log`, the new Merkle `root` (hex), and an `inclusion_proof`. The
+ *  witness is stateless: thread `log` back on each call. An action with no
+ *  inclusion proof against `root` is *provably omitted*. */
+export function witnessAppend(
+  chainDigestHex: string,
+  actionDigestHex: string,
+  nonceHex: string,
+  opts: { prevRootHex?: string; log?: Receipt[] } = {},
+): { receipt: Receipt; log: Receipt[]; leaf_index: number; root: string; inclusion_proof: InclusionProof } {
+  const resp = invoke({
+    cmd: "witness_append",
+    log: opts.log ?? [],
+    chain_digest: chainDigestHex,
+    action_digest: actionDigestHex,
+    nonce: nonceHex,
+    prev_root: opts.prevRootHex ?? "00".repeat(32),
+  });
+  return resp as {
+    receipt: Receipt;
+    log: Receipt[];
+    leaf_index: number;
+    root: string;
+    inclusion_proof: InclusionProof;
+  };
+}
+
+/** Produce an **independent** completion attestation (not self-reported). `role`
+ *  is "third_party" or "counter_signed". */
+export function attest(
+  seedHex: string,
+  attester: Principal,
+  chainDigestHex: string,
+  requestedActionHex: string,
+  outcomeHex: string,
+  witnessedRootHex: string,
+  inclusionProof: InclusionProof,
+  role: "third_party" | "counter_signed" = "third_party",
+): Completion {
+  return invoke({
+    cmd: "attest",
+    seed: seedHex,
+    attester,
+    chain_digest: chainDigestHex,
+    requested_action: requestedActionHex,
+    outcome: outcomeHex,
+    witnessed_root: witnessedRootHex,
+    inclusion_proof: inclusionProof,
+    role,
+  })["completion"] as Completion;
+}
+
+/** The full §6 `verify()`: chain + witness completeness (**omission**) +
+ *  independent attestation + non-equivocation, fail closed. Throws
+ *  {@link IndexOneError} naming the unresolved step. */
+export function composedVerify(
+  chain: Chain,
+  rootKey: PublicKey,
+  trustedRootHex: string,
+  actionReceipt: Receipt,
+  completion: Completion,
+  opts: { trustedAttesters?: PublicKey[]; allowCounterSigned?: boolean } = {},
+): Scope {
+  const resp = invoke({
+    cmd: "composed_verify",
+    chain,
+    root_key: rootKey,
+    trusted_root: trustedRootHex,
+    action_receipt: actionReceipt,
+    completion,
+    policy: {
+      trusted_attesters: opts.trustedAttesters ?? [],
+      allow_counter_signed: opts.allowCounterSigned ?? false,
+    },
+  });
+  return resp["effective_scope"] as Scope;
+}
+
 /** Wraps one agent's identity (a 32-byte hex seed + principal). */
 export class Client {
   constructor(

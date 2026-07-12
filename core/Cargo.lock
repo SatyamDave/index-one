@@ -324,8 +324,11 @@ name = "indexone-cli"
 version = "0.0.1"
 dependencies = [
  "hex",
+ "indexone-attestation",
  "indexone-chain",
  "indexone-crypto",
+ "indexone-verifier",
+ "indexone-witness",
  "serde",
  "serde_json",
 ]

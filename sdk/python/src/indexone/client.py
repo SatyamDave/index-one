@@ -142,12 +142,7 @@ def attenuate(
     return {"chain": resp["chain"], "to_key": resp["to_key"]}
 
 
-def verify(chain: dict[str, Any], root_key: dict[str, Any]) -> Scope:
-    """Verify a chain against a trusted root key; return its effective (narrowest)
-    scope. Raises ``IndexOneError`` (fail closed) on any invalid chain.
-    """
-    resp = _invoke({"cmd": "verify", "chain": chain, "root_key": root_key})
-    s = resp["effective_scope"]
+def _scope_from(s: dict[str, Any]) -> Scope:
     return Scope(
         permissions=s["permissions"],
         max_depth=s["max_depth"],
@@ -155,6 +150,126 @@ def verify(chain: dict[str, Any], root_key: dict[str, Any]) -> Scope:
         budget=s.get("budget"),
         currency=s.get("currency"),
     )
+
+
+def verify(chain: dict[str, Any], root_key: dict[str, Any]) -> Scope:
+    """Verify a chain against a trusted root key; return its effective (narrowest)
+    scope. Raises ``IndexOneError`` (fail closed) on any invalid chain.
+    """
+    resp = _invoke({"cmd": "verify", "chain": chain, "root_key": root_key})
+    return _scope_from(resp["effective_scope"])
+
+
+# ── Witness · attestation · composed verify — the full §6 product surface ────
+#
+# These reach past the delegation chain to the three deliverables the competing
+# drafts punt (CLAUDE.md §6): a witnessed action (completeness/omission), an
+# independent completion attestation (not self-reported), and the composed,
+# fail-closed verify(). Chains / keys / receipts / proofs / attestations are
+# opaque JSON threaded between calls; digests are lowercase hex.
+
+
+def pubkey(seed_hex: str) -> dict[str, Any]:
+    """Derive a public key from a 32-byte hex seed — e.g. to name a trusted
+    attester in a :func:`composed_verify` policy without issuing a chain.
+    """
+    return _invoke({"cmd": "pubkey", "seed": seed_hex})["public_key"]
+
+
+def chain_digest(chain: dict[str, Any]) -> str:
+    """The content digest of a chain (hex) — what receipts and attestations bind
+    to. Present it to :func:`witness_append` and :func:`attest`.
+    """
+    return _invoke({"cmd": "chain_digest", "chain": chain})["digest"]
+
+
+def witness_append(
+    chain_digest_hex: str,
+    action_digest_hex: str,
+    nonce_hex: str,
+    *,
+    prev_root_hex: str = "00" * 32,
+    log: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Append an action receipt to the transparency witness. Returns
+    ``{receipt, log, leaf_index, root, inclusion_proof}`` — the new Merkle
+    ``root`` (hex) and an ``inclusion_proof`` proving the action is present. The
+    witness is stateless here: thread ``log`` back on each call to grow one log.
+    An action with no inclusion proof against ``root`` is *provably omitted*.
+    """
+    return _invoke(
+        {
+            "cmd": "witness_append",
+            "log": log or [],
+            "chain_digest": chain_digest_hex,
+            "action_digest": action_digest_hex,
+            "nonce": nonce_hex,
+            "prev_root": prev_root_hex,
+        }
+    )
+
+
+def attest(
+    seed_hex: str,
+    attester: Principal,
+    chain_digest_hex: str,
+    requested_action_hex: str,
+    outcome_hex: str,
+    witnessed_root_hex: str,
+    inclusion_proof: dict[str, Any],
+    *,
+    role: str = "third_party",
+) -> dict[str, Any]:
+    """Produce an **independent** completion attestation (not self-reported).
+    ``role`` is ``"third_party"`` or ``"counter_signed"``. Returns the
+    ``CompletionAttestation`` to hand to :func:`composed_verify`.
+    """
+    return _invoke(
+        {
+            "cmd": "attest",
+            "seed": seed_hex,
+            "attester": asdict(attester),
+            "chain_digest": chain_digest_hex,
+            "requested_action": requested_action_hex,
+            "outcome": outcome_hex,
+            "witnessed_root": witnessed_root_hex,
+            "inclusion_proof": inclusion_proof,
+            "role": role,
+        }
+    )["completion"]
+
+
+def composed_verify(
+    chain: dict[str, Any],
+    root_key: dict[str, Any],
+    trusted_root_hex: str,
+    action_receipt: dict[str, Any],
+    completion: dict[str, Any],
+    *,
+    trusted_attesters: list[dict[str, Any]] | None = None,
+    allow_counter_signed: bool = False,
+) -> Scope:
+    """The full CLAUDE.md §6 ``verify()``: chain signatures + attenuation, witness
+    completeness (**omission**), independent completion attestation, and
+    non-equivocation — fail closed. Returns the effective scope, or raises
+    :class:`IndexOneError` naming the unresolved step (e.g. omission, not
+    independently attested, attester not anchored).
+    """
+    resp = _invoke(
+        {
+            "cmd": "composed_verify",
+            "chain": chain,
+            "root_key": root_key,
+            "trusted_root": trusted_root_hex,
+            "action_receipt": action_receipt,
+            "completion": completion,
+            "policy": {
+                "trusted_attesters": trusted_attesters or [],
+                "allow_counter_signed": allow_counter_signed,
+            },
+        }
+    )
+    return _scope_from(resp["effective_scope"])
 
 
 class Client:

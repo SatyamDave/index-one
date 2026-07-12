@@ -28,8 +28,13 @@ from .client import (
     Principal,
     Scope,
     attenuate,
+    attest,
+    chain_digest,
+    composed_verify,
     issue,
+    pubkey,
     verify,
+    witness_append,
     wrap,
 )
 
@@ -39,7 +44,12 @@ __all__ = [
     "Principal",
     "Scope",
     "attenuate",
+    "attest",
+    "chain_digest",
+    "composed_verify",
     "issue",
+    "pubkey",
     "verify",
+    "witness_append",
     "wrap",
 ]
