@@ -13,7 +13,7 @@
 use indexone_attestation::CompletionAttestation;
 use indexone_chain::{Chain, ChainError, Principal, Scope};
 use indexone_crypto::{Ed25519Signer, PublicKey, Signer};
-use indexone_verifier::{verify, VerifiableAction, VerifyError};
+use indexone_verifier::{verify, VerifiableAction, VerifyError, VerifyPolicy};
 use indexone_witness::{ActionReceipt, Digest, InclusionProof, Witness};
 
 fn principal(id: &str) -> Principal {
@@ -91,6 +91,7 @@ fn record(chain: &Chain, action: Digest) -> (ActionReceipt, InclusionProof, Dige
     let receipt = ActionReceipt {
         chain_digest: chain.digest(),
         action_digest: action,
+        nonce: [0xCD; 32],
         prev_root: w.root(),
     };
     let idx = w.append(&receipt);
@@ -108,6 +109,7 @@ struct Outcome {
 /// (Control: proves the verifier is not rejecting everything.)
 fn case_honest_accepted() -> Outcome {
     let w = build_world();
+    let policy = VerifyPolicy::third_party(vec![w.attester.public_key()]);
     let action = [42u8; 32];
     let (receipt, proof, root) = record(&w.chain, action);
     let completion = CompletionAttestation::attest(
@@ -125,7 +127,7 @@ fn case_honest_accepted() -> Outcome {
         completion,
     };
     Outcome {
-        passed: verify(&va, &w.root_key, &root).is_ok(),
+        passed: verify(&va, &w.root_key, &root, &policy).is_ok(),
     }
 }
 
@@ -134,6 +136,7 @@ fn case_honest_accepted() -> Outcome {
 /// a completion signed by the executing agent itself.
 fn case_self_report_rejected() -> Outcome {
     let w = build_world();
+    let policy = VerifyPolicy::third_party(vec![w.attester.public_key()]);
     let action = [42u8; 32];
     let (receipt, proof, root) = record(&w.chain, action);
     let completion = CompletionAttestation::attest(
@@ -152,7 +155,7 @@ fn case_self_report_rejected() -> Outcome {
     };
     Outcome {
         passed: matches!(
-            verify(&va, &w.root_key, &root),
+            verify(&va, &w.root_key, &root, &policy),
             Err(VerifyError::Attestation(_))
         ),
     }
@@ -163,12 +166,14 @@ fn case_self_report_rejected() -> Outcome {
 /// inclusion proof against the witnessed root — omission is detectable here.
 fn case_omission_rejected() -> Outcome {
     let w = build_world();
+    let policy = VerifyPolicy::third_party(vec![w.attester.public_key()]);
     let recorded = [42u8; 32];
     let (_r, proof, root) = record(&w.chain, recorded);
     let omitted = [99u8; 32]; // never appended to the witness
     let omitted_receipt = ActionReceipt {
         chain_digest: w.chain.digest(),
         action_digest: omitted,
+        nonce: [0xCD; 32],
         prev_root: [0u8; 32],
     };
     let completion = CompletionAttestation::attest(
@@ -189,7 +194,10 @@ fn case_omission_rejected() -> Outcome {
     };
     Outcome {
         passed: chain_valid
-            && matches!(verify(&va, &w.root_key, &root), Err(VerifyError::Omission)),
+            && matches!(
+                verify(&va, &w.root_key, &root, &policy),
+                Err(VerifyError::Omission)
+            ),
     }
 }
 
@@ -198,6 +206,7 @@ fn case_omission_rejected() -> Outcome {
 /// gossip-trusted root.
 fn case_equivocation_rejected() -> Outcome {
     let w = build_world();
+    let policy = VerifyPolicy::third_party(vec![w.attester.public_key()]);
     let action = [42u8; 32];
     let (receipt, proof, root) = record(&w.chain, action);
     let completion = CompletionAttestation::attest(
@@ -217,7 +226,7 @@ fn case_equivocation_rejected() -> Outcome {
     };
     Outcome {
         passed: matches!(
-            verify(&va, &w.root_key, &gossip_root),
+            verify(&va, &w.root_key, &gossip_root, &policy),
             Err(VerifyError::Equivocation)
         ),
     }
@@ -242,6 +251,37 @@ fn case_scope_widening_rejected() -> Outcome {
     );
     Outcome {
         passed: matches!(result, Err(ChainError::ScopeWidened)),
+    }
+}
+
+/// AUDIT FINDING 1 (CRITICAL): "independent" must mean a *trusted identity*, not
+/// merely a key ≠ the executor. The executing agent mints a throwaway key and
+/// "independently" attests its own work; the verifier MUST reject it.
+fn case_sockpuppet_rejected() -> Outcome {
+    let w = build_world();
+    let policy = VerifyPolicy::third_party(vec![w.attester.public_key()]);
+    let action = [42u8; 32];
+    let (receipt, proof, root) = record(&w.chain, action);
+    let sockpuppet = Ed25519Signer::from_seed([66u8; 32]); // controlled by the executor
+    let completion = CompletionAttestation::attest(
+        &sockpuppet,
+        principal("attester:notary"), // lies about being a notary
+        w.chain.digest(),
+        action,
+        action,
+        root,
+        proof,
+    );
+    let va = VerifiableAction {
+        chain: w.chain,
+        action_receipt: receipt,
+        completion,
+    };
+    Outcome {
+        passed: matches!(
+            verify(&va, &w.root_key, &root, &policy),
+            Err(VerifyError::AttesterNotAnchored)
+        ),
     }
 }
 
@@ -279,6 +319,12 @@ fn main() {
             "monotonic attenuation (AIP/Biscuit/APS)",
             "REJECT a hop granting authority its parent lacked",
             case_scope_widening_rejected,
+        ),
+        (
+            "Sockpuppet attestation rejected",
+            "independence = trusted identity, not key-inequality — VERIFIER_AUDIT Finding 1",
+            "REJECT a throwaway key posing as an independent attester",
+            case_sockpuppet_rejected,
         ),
     ];
 

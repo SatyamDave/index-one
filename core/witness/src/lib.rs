@@ -57,6 +57,11 @@ pub struct ActionReceipt {
     pub chain_digest: Digest,
     /// Digest of the action itself (request/params/outcome — caller-defined).
     pub action_digest: Digest,
+    /// Per-invocation nonce making this receipt unique even when the same chain
+    /// performs the same-shaped action twice. Without it, two byte-identical
+    /// actions (e.g. two identical $40 charges) would share a leaf, and an
+    /// attestation for one would be replayable for the other (audit Finding 6).
+    pub nonce: Digest,
     /// The Merkle root this receipt was appended on top of, chaining receipts
     /// so a rewrite of history is detectable.
     pub prev_root: Digest,
@@ -325,10 +330,19 @@ pub fn verify_consistency(
     proof.is_empty() && new_hash == *new_root && old_hash == *old_root
 }
 
+/// Largest audit-path length any honest proof can have: a tree of `usize::MAX`
+/// leaves has depth `⌈log2⌉ ≤ 64`. Anything longer is attacker padding — reject
+/// it before folding (audit Finding 4: unbounded proof length → CPU/mem DoS).
+pub const MAX_PROOF_PATH: usize = 64;
+
 /// Verify that `receipt` is included in a tree whose root is `root`, using
 /// `proof`. Pure and stateless — the verifier checks this without touching the
-/// witness's storage. Returns `false` for any mismatch (fail closed).
+/// witness's storage. Returns `false` for any mismatch (fail closed), including
+/// a malformed or oversized proof.
 pub fn verify_inclusion(receipt: &ActionReceipt, proof: &InclusionProof, root: &Digest) -> bool {
+    if proof.leaf_index >= proof.tree_size || proof.path.len() > MAX_PROOF_PATH {
+        return false;
+    }
     let mut acc = hash_leaf(&receipt.canonical_bytes());
     for step in &proof.path {
         acc = if step.sibling_is_left {
@@ -453,6 +467,7 @@ mod tests {
         ActionReceipt {
             chain_digest: [1u8; 32],
             action_digest: [action; 32],
+            nonce: [action; 32],
             prev_root: [0u8; 32],
         }
     }
@@ -511,6 +526,32 @@ mod tests {
         w.append(&receipt(1));
         let after = w.root();
         assert_ne!(before, after);
+    }
+
+    // Audit Finding 4: an oversized (attacker-padded) or out-of-range proof is
+    // rejected *before* folding, so it can't burn CPU/memory.
+    #[test]
+    fn oversized_or_malformed_proof_is_rejected() {
+        let mut w = Witness::new();
+        w.append(&receipt(1));
+        let root = w.root();
+        let good = w.inclusion_proof(0).unwrap();
+        assert!(verify_inclusion(&receipt(1), &good, &root));
+
+        let mut huge = good.clone();
+        huge.path = vec![
+            PathStep {
+                sibling: [0u8; 32],
+                sibling_is_left: false
+            };
+            MAX_PROOF_PATH + 1
+        ];
+        assert!(!verify_inclusion(&receipt(1), &huge, &root));
+
+        let mut oob = good;
+        oob.leaf_index = 99;
+        oob.tree_size = 1;
+        assert!(!verify_inclusion(&receipt(1), &oob, &root));
     }
 
     // Property: RFC 6962 consistency — an appended-only log proves the earlier
