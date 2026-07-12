@@ -46,20 +46,67 @@ the concrete HTTP source lives in a separate crate.
 ## v2 (documented destination, not built)
 
 When the threat model demands defending against a *misbehaving* operator
-per-request (not just an unreliable one): a **sparse Merkle tree keyed directly by
-the 32-byte `RevocationId`** (blake3 already gives a uniform 256-bit path) — leaf =
-`H(metadata)` if revoked, else the empty-leaf constant; non-revocation proof =
-audit path to the empty leaf against a signed root (~few hundred bytes after
-default-sibling compression). Then **log-back it** (Trillian VLDM): publish
-successive signed roots as entries in the **RFC 6962 log we already run**
-(`core/witness` + `services/witness`), so consistency/append-only — the one thing
-a bare map lacks — comes free, and rollback/equivocation becomes cryptographically
-detectable.
+per-request (not just an unreliable one), the upgrade is a **log-backed sparse
+Merkle map**. Two composable pieces, both grounded in the survey below:
+
+**(a) Sparse Merkle map keyed by the 32-byte `RevocationId`.** blake3 already
+gives a uniform 256-bit path, so the id *is* the root-to-leaf direction vector
+over a notional 2²⁵⁶-leaf tree. A revoked key's leaf holds a present-value; every
+other leaf holds the empty-leaf constant. A **non-revocation proof** is an audit
+path terminating in the empty leaf (or, in the compact variant, in a *different*
+key `k'≠k` at the slot), against a signed root. The 2²⁵⁶ tree is tractable via
+the default-subtree trick — one precomputed empty-hash per level, `Dᵢ =
+H(Dᵢ₋₁‖Dᵢ₋₁)` — so only the ~`log₂ n` non-default siblings plus a level bitmap
+travel in the proof: **~0.5–0.8 KB** for 10⁴–10⁶ entries (vs. 8 KB uncompressed).
+
+*Reuse, don't hand-roll (no-bloat).* The survey found three maintained crates
+with native non-inclusion proofs; the pick is **`sparse-merkle-tree`
+(nervosnetwork/jjyr)** — pluggable `Hasher` (drop in blake3), `no_std`, MIT,
+already forked into Namada — with **`jmt`** (Penumbra; versioned roots, Apache-2.0)
+and **`monotree`** (blake3-default, MIT) as fallbacks. `ct-merkle`/`rs_merkle`
+are the wrong tool (append-only/plain trees, no absence proofs).
+
+**(b) Log-back it (Trillian VLDM pattern).** A bare signed map has no native
+append-only check, so it can silently **equivocate** (different root to different
+observers) or **roll back** (un-revoke by omitting an entry) — the exact holes v1
+mitigates only by monotonic epoch + gossip. The fix: commit each epoch's map root
+as **one leaf in the RFC 6962 log we already run** (`core/witness` +
+`services/witness`), with the leaf payload `{epoch, map_root, log_STH_it_was_built_over}`.
+A client then verifies **three** proofs, reusing the log's existing APIs
+unchanged: (1) map (non-)inclusion of the id against `map_root`; (2) log inclusion
+that the `map_root` leaf is in the log; (3) log consistency from its last-seen STH
+→ current STH. Proof (2) kills equivocation (a contradictory root is a second,
+detectable leaf); proof (3) kills silent rollback (the epoch sequence can only
+grow). Added surface is small: one map + the "root → log leaf" rule; no new log
+proof types.
+
+**Honest boundary (unchanged from v1's spirit).** Log-backing buys
+*detectability* of root-equivocation and rollback — **not completeness**. An
+operator that simply never inserts a revocation produces a perfectly valid,
+consistent map; catching that still needs an out-of-band monitor comparing the
+map against revocation intent (as CT needs domain monitors). And detection, not
+prevention, is the CT-style guarantee: it relies on STH gossip / the witness
+quorum we already run, plus a client freshness policy (insist on a recent,
+consistency-checked epoch).
+
+**v2 crypto pitfalls to encode (from the survey).** Leaf-vs-internal domain
+separation (RFC 6962's `0x00`/`0x01` prefixing, or blake3 `derive_key` per node
+type) to stop second-preimage leaf/node confusion; the empty-leaf constant must
+be a signed parameter both sides agree on and no real leaf can collide with; in
+the compact variant the verifier **must** check `k'≠k`; and the default-sibling
+bitmap must be authenticated by reconstructing `Dᵢ` locally, never trusting
+attacker-supplied "default" positions.
 
 ## Sources
 
-Laurie & Kasper, *Revocation Transparency*; Dahlberg/Pulls, *Efficient Sparse
-Merkle Trees* (ePrint 2016/683); Haider, *Compact Sparse Merkle Trees* (ePrint
-2018/955); Google Trillian *Verifiable Data Structures*; RFC 9162 (CT v2);
-Larisch et al., *CRLite* (IEEE S&P 2017) + Mozilla Clubcard (2025); Smith et al.,
-*Let's Revoke* (NDSS 2020); `draft-ietf-scitt-architecture-22`.
+Laurie & Kasper, *Revocation Transparency* (2²⁵⁶-leaf SMT, empty-hash absence
+proofs); Dahlberg/Pulls/Peeters, *Efficient Sparse Merkle Trees* (ePrint
+2016/683 — compressed (non-)membership proofs, <4 ms); Haider, *Compact Sparse
+Merkle Trees* (ePrint 2018/955); iden3/Baylina & Bellés, *Sparse Merkle Trees*
+(leaf = `H(1‖k‖v)` domain separation); Google Trillian *Verifiable Data
+Structures* (log-derived map, "signed map checkpoint incorporates a log
+checkpoint"); RFC 9162 (CT v2 — log-only, no map/revocation); Larisch et al.,
+*CRLite* (IEEE S&P 2017) + Mozilla Clubcard (2025); Smith et al., *Let's Revoke*
+(NDSS 2020); `draft-ietf-scitt-architecture-22` (revocation & non-inclusion
+explicitly out of scope). Rust SMT crates surveyed: `sparse-merkle-tree`
+(nervosnetwork), `jmt` (Penumbra), `monotree`.
