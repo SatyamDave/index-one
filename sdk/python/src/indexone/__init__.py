@@ -1,21 +1,45 @@
-"""index-one SDK.
+"""IndexOne SDK.
 
     pip install indexone
 
-Target one-liner usage (once implemented):
+Thin bindings over the Rust core (``/core``) via the ``indexone-cli`` sidecar --
+real signing/verification lives in ``indexone-chain`` / ``indexone-crypto``, not
+in this package. Build the sidecar with ``cargo build -p indexone-cli`` and put
+it on ``PATH`` or point ``INDEXONE_CLI`` at it.
 
     import indexone
+    from indexone import Principal, Scope
 
-    agent = indexone.wrap(my_agent, scope=..., budget=...)
-    token = agent.sign(action)
-    indexone.verify(token)
-
-No real signing/verification is implemented yet -- see `indexone.client`
-for the stubbed interface. The SDK is a thin wrapper; real cryptography
-lives in the `indexone-chain` / `indexone-crypto` Rust core (`/core`), not
-in this package.
+    alice = indexone.wrap("00" * 32, Principal("human:alice", "Alice"))
+    scope = Scope(["payments.charge"], max_depth=2, expires_at=EXP, budget=10_000)
+    issued = alice.issue(scope)
+    step = alice.attenuate(
+        issued["chain"], Principal("agent:a@org1", "A"), "11" * 32,
+        Scope(["payments.charge"], max_depth=1, expires_at=EXP, budget=5_000),
+        "book travel",
+    )
+    # Raises IndexOneError (fail closed) if the chain is invalid:
+    effective = indexone.verify(step["chain"], issued["root_key"])
 """
 
-from .client import Client, verify, wrap
+from .client import (
+    Client,
+    IndexOneError,
+    Principal,
+    Scope,
+    attenuate,
+    issue,
+    verify,
+    wrap,
+)
 
-__all__ = ["Client", "wrap", "verify"]
+__all__ = [
+    "Client",
+    "IndexOneError",
+    "Principal",
+    "Scope",
+    "attenuate",
+    "issue",
+    "verify",
+    "wrap",
+]

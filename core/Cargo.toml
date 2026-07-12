@@ -19,6 +19,7 @@ members = [
     "witness",
     "attestation",
     "verifier",
+    "cli",
 ]
 
 [workspace.package]
