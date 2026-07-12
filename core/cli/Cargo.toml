@@ -17,3 +17,6 @@ serde_json.workspace = true
 hex.workspace = true
 indexone-crypto = { workspace = true }
 indexone-chain = { workspace = true }
+indexone-witness = { workspace = true }
+indexone-attestation = { path = "../attestation" }
+indexone-verifier = { path = "../verifier" }
