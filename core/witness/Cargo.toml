@@ -16,3 +16,4 @@ blake3.workspace = true
 indexone-crypto = { workspace = true }
 
 [dev-dependencies]
+proptest.workspace = true

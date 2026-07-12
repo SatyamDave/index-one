@@ -1,0 +1,52 @@
+# On-demand fuzzing campaign (libFuzzer via cargo-fuzz, nightly only). NOT a
+# member of the /core workspace, so nightly/sanitizer flags never touch the
+# stable build. The CI-gated invariant coverage is the `proptest` suite in each
+# core crate's tests/; this is the deeper, longer-running campaign over the raw
+# serde-deserialize-then-verify surface a remote peer actually feeds.
+#
+#   rustup toolchain install nightly && cargo install cargo-fuzz
+#   cargo +nightly fuzz run fuzz_chain_verify --fuzz-dir fuzz -- -max_total_time=60
+[package]
+name = "indexone-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+indexone-crypto = { path = "../core/crypto" }
+indexone-chain = { path = "../core/chain" }
+indexone-witness = { path = "../core/witness" }
+indexone-attestation = { path = "../core/attestation" }
+
+[[bin]]
+name = "fuzz_chain_verify"
+path = "fuzz_targets/fuzz_chain_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_receipt"
+path = "fuzz_targets/fuzz_receipt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_attestation_verify"
+path = "fuzz_targets/fuzz_attestation_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_inclusion_proof"
+path = "fuzz_targets/fuzz_inclusion_proof.rs"
+test = false
+doc = false
+bench = false
