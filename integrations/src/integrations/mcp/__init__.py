@@ -1,5 +1,19 @@
-"""MCP request-header signing/verification hooks."""
+"""MCP request-header signing/verification hooks (Web Bot Auth / RFC 9421)."""
 
-from .hooks import sign_request_headers, verify_request_headers
+from .hooks import (
+    TOKEN_HEADER,
+    MCPVerificationError,
+    Signer,
+    Verifier,
+    sign_request,
+    verify_request,
+)
 
-__all__ = ["sign_request_headers", "verify_request_headers"]
+__all__ = [
+    "TOKEN_HEADER",
+    "MCPVerificationError",
+    "Signer",
+    "Verifier",
+    "sign_request",
+    "verify_request",
+]
