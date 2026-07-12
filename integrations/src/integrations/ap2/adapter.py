@@ -148,6 +148,38 @@ def to_delegation_facts(
     )
 
 
+def delegation_facts_from_mandate(
+    claims: dict[str, Any],
+    *,
+    user_id: str,
+    agent_id: str,
+) -> DelegationFacts:
+    """Bridge the claims of a **cryptographically verified** SD-JWT-VC mandate
+    (see :mod:`integrations.ap2.sdjwt_vc`) to IndexOne delegation facts. Expects
+    the mandate to carry a ``budget`` claim ``{"amount": <minor>, "currency": …}``
+    and a ``purpose`` claim (the analogue of a delegation block's ``purpose``).
+
+    This is the closed-loop replacement for the old "crypto is an injected
+    callable" stand-in: run :func:`sdjwt_vc.verify_mandate` first, then pass the
+    verified ``claims`` here, then :func:`check_consistency` against the IndexOne
+    root scope. A malformed or absent budget fails closed.
+    """
+    budget = claims.get("budget")
+    if not isinstance(budget, dict) or "amount" not in budget or "currency" not in budget:
+        raise AP2ValidationError("verified mandate has no well-formed budget claim")
+    try:
+        amount = int(budget["amount"])
+    except (TypeError, ValueError) as exc:
+        raise AP2ValidationError("mandate budget amount is not an integer") from exc
+    return DelegationFacts(
+        user_id=user_id,
+        agent_id=agent_id,
+        budget_minor=amount,
+        currency=str(budget["currency"]),
+        purpose=str(claims.get("purpose", "")),
+    )
+
+
 def check_consistency(
     facts: DelegationFacts,
     indexone_root_principal_id: str,
