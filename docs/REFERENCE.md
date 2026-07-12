@@ -13,24 +13,40 @@ built a certain way, it should be answerable from this file.
 
 ## 1. Papers to build from
 
+> **Verification note (see `RESEARCH_VERIFICATION.md`).** Every citation below
+> was reproduced from its primary source. Corrections found in that pass are
+> folded into the entries here — read `RESEARCH_VERIFICATION.md §7` for the full
+> list before quoting anything externally.
+
 ### AIP: Agent Identity Protocol for Verifiable Delegation Across MCP and A2A
-arXiv 2603.24775
+arXiv 2603.24775 — Sunil Prakash (25 Mar 2026). **Single-author, non-peer-reviewed
+preprint + an individual, non-adopted Internet-Draft (`draft-prakash-aip-00`);
+all benchmarks are self-reported.** Cite as such.
 
 **Why it matters to us:** our closest prior art, and the source of the
 Invocation-Bound Capability Token (IBCT) block structure we're adapting —
 Block 0 authority + Block N delegation is directly descended from AIP's
-construction. Study the IBCT construction itself and its seven required
-properties closely before diverging from it; every place we differ should
-be a deliberate choice, not an oversight.
+construction. Two corrections, verified against the primary source: the
+mandatory per-hop field AIP names is **`context`** (not `purpose` — same
+semantics, different name), and the **only** completion gap AIP explicitly
+concedes is **self-reported completion** (it names counter-signing / third-party
+attestation as unbuilt in v1). The words "omission," "completeness," and
+"equivocation" do **not** appear in the paper — those are *our* threat labels,
+not AIP's admitted non-goals; present them as gaps we identify. Study the IBCT
+construction and its seven required properties before diverging.
 
 ### AI Identity: Standards, Gaps, and Research Directions for AI Agents
-arXiv 2604.23280 (April 2026)
+arXiv 2604.23280 (April 2026) — **Otsuka, Toyoda, Leung** (a 3-author preprint;
+_not_ the OpenID/Tobin South group — do not conflate the two).
 
 **Why it matters to us:** this is our problem statement, almost verbatim —
-no deployed protocol proves which human principal authorized which action
-at the 3rd/4th hop across organizations, and no tool verifies intent
-legitimacy. Cross-org attribution plus intent integrity is our zero-to-one;
-this paper is the citation for why that gap exists and hasn't been closed.
+its five named gaps include the "Recursive Delegation and Accountability Gap"
+and "Governance Opacity and Enforcement Paradox." No deployed protocol proves
+which human principal authorized which action at the 3rd/4th hop across
+organizations. Cross-org attribution is our zero-to-one; this paper is the
+citation for why that gap exists. (For the delegation *framing* itself, lead
+with South et al. ICML 2025 and the OpenID whitepaper below — peer-reviewed /
+institutional, the safest citations.)
 
 ### Authenticated Delegation and Authorized AI Agents
 arXiv 2501.09674 (Tobin South et al., ICML 2025)
@@ -48,11 +64,15 @@ risks introduced by recursive delegation — the exact failure mode our
 `chain` crate's hash-linked, scope-narrowing blocks are designed to close.
 
 ### AITH (post-quantum continuous delegation, ML-DSA-87)
+arXiv 2604.07695 — Zhaoliang Chen. **Single-author student preprint, no external
+validation.** Use only as an existence proof of ML-DSA-87 continuous delegation;
+do **not** lean on its performance numbers.
 
-**Why it matters to us:** the basis for our crypto-agility / hybrid-
-signature design in `indexone-crypto` — informs the `Algorithm::MlDsa87`
-and `Algorithm::Hybrid` variants and why every block carries its own
-algorithm tag instead of the chain committing to one algorithm globally.
+**Why it matters to us:** an existence proof for the crypto-agility / hybrid-
+signature design in `indexone-crypto` — the `Algorithm::MlDsa87` and
+`Algorithm::Hybrid` variants and per-block algorithm tags. (Now shipped: real
+ML-DSA-87 via the `fips204` crate, plus hybrid classical+PQ where both must
+verify — see `core/crypto`.)
 
 ### Macaroons: Cookies with Contextual Caveats for Decentralized Authorization in the Cloud
 Birgisson, Politz, Erlingsson et al., Google
@@ -87,11 +107,23 @@ Couprie, Clément Delafargue.
 
 ### `google-agentic-commerce/AP2`
 
-**Why it matters to us:** the payment-mandate rail we integrate with *and*
-attack (Intent/Cart/Payment mandates, W3C Verifiable Credentials, ECDSA
-P-256). The seam we exploit and then close: AP2 binds a mandate to a
-single user, not across an agent chain — see `integrations/attack` for a
-runnable demonstration of exactly what that seam allows.
+**Why it matters to us:** the payment-mandate rail we build **on top of**. Verified
+facts (correcting earlier drafts of this doc): AP2 uses **SD-JWT VC / Verifiable
+Digital Credentials over OpenID4VP**, signed with **non-deterministic ECDSA
+(P-256/ES256 as the canonical example, not a hard requirement, and never
+Ed25519)**. The v0.2 spec renamed mandates to **Checkout + Payment** (Intent
+became an *open mandate*); the v0.1 SDK still ships Intent/Cart/Payment. Build
+any adapter against the JSON Schemas in `code/sdk/schemas/ap2/*`.
+
+**AP2 is not the seam we thought.** AP2 **does** support delegation and
+multi-step delegation chains (SD-JWT `cnf` key-binding, a "Trusted Agent
+Provider" model) — the earlier "binds a mandate to a single user, not a chain"
+claim was **wrong**, and "Delegated Trust / Temporal Gaps" are **not** AP2's own
+named open problems ("Temporal Gaps" is a third-party critique, arXiv 2602.06345).
+Our real wedge: AP2 produces an audit trail but has **no cross-org transparency
+mechanism to make omission detectable and no independent completion attestation**
+— we turn AP2's audit trail into defensible, tamper-evident attribution *over*
+AP2 chains. See `integrations/attack` (illustrative) and `exploits/` (real crypto).
 
 ### `rescrv/libmacaroons`
 
@@ -120,10 +152,19 @@ differently (cross-org attribution being the headline difference).
 - **Mastercard Agent Pay / Verifiable Intent** — Mastercard's equivalent.
 - **FIDO Agentic Authentication WG** — where agent authentication standards
   are being worked out at the FIDO Alliance.
-- **IETF WIMSE** (`draft-ietf-wimse-arch`, §3.3.9) — Workload Identity in
-  Multi-System Environments; §3.3.9 explicitly names multi-hop delegation
-  as an unsolved failure mode. Watch this closely — it's the standards-body
-  articulation of the exact problem index-one solves.
+- **IETF WIMSE** (`draft-ietf-wimse-arch`) — Workload Identity in Multi-System
+  Environments. **Correction:** there is no §3.3.9 and no "R1–R9" requirements
+  list (both were fabricated in earlier drafts of this doc). Multi-hop, AI-to-AI
+  delegation lives in **§3.3.8 "AI and ML-Based Intermediaries"** (with §3.3.4
+  "Delegation and Impersonation"), and it is framed **prescriptively**, not as an
+  admitted-unsolved gap: it warns "a chain of AI-to-AI interactions could
+  unintentionally extend authority far beyond what was originally granted" and
+  mandates that "each hop … MUST explicitly scope and re-bind the security
+  context." Cite it as: WIMSE recognizes the multi-hop cross-org risk and
+  specifies only per-hop re-binding, leaving verifiable end-to-end provenance to
+  implementations — which is what index-one provides.
+- **SCITT** (`draft-ietf-scitt-architecture`) — Transparency Service / Signed
+  Statement / Receipt / Registration Policy. The witness architecture we build on.
 - **Web Bot Auth** — per-request Ed25519 header signing. This is our
   transport model for `integrations/mcp`: the capability chain travels
   as a header, signed per-request, alongside whatever payload it authorizes.

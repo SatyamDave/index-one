@@ -31,7 +31,7 @@ This file is the single source of truth for the project. It is both (a) the repo
 
 **What's happening in the world:** AI agents are becoming economic actors that delegate tasks to _other_ companies' agents and pay each other autonomously. The identity/authorization rails for this are being poured right now (Google AP2, Mastercard Verifiable Intent, FIDO Agentic Auth WG, Cloudflare Web Bot Auth, Visa Trusted Agent Protocol). These rails solve the **single hop**: one human authorizes one agent for one action.
 
-**The gap:** the moment a task crosses three or more agents across organizational trust boundaries — the actual future — no deployed mechanism can prove, locally and without a callback, _which human principal is accountable at hop 3–4_, _that the reported action set is complete_, or _that self-reported completion is honest_. This is stated plainly in the WIMSE cross-org delegation problem statement and the AI-identity survey (Section 15).
+**The gap:** the moment a task crosses three or more agents across organizational trust boundaries — the actual future — no deployed mechanism can prove, locally and without a callback, _which human principal is accountable at hop 3–4_, _that the reported action set is complete_, or _that self-reported completion is honest_. The IETF WIMSE architecture (§3.3.8) recognizes this multi-hop cross-org risk in a credible body's own words — but only specifies per-hop re-binding, leaving verifiable end-to-end provenance to implementations — and the AI-identity survey (Section 15) names it as an open gap. _(Corrections applied per `docs/RESEARCH_VERIFICATION.md`: WIMSE has no "§3.3.9" or "R1–R9 problem statement" — those were fabricated; the real anchor is §3.3.8/§3.3.4.)_
 
 **What we build:** the layer above the delegation chain — a shared-witness/transparency anchor for **completeness and non-equivocation**, an **independent completion-attestation** mechanism (the fix AIP names but doesn't build), and an **adversarial conformance suite + hardened verifier** across the competing drafts.
 
@@ -48,7 +48,7 @@ This file is the single source of truth for the project. It is both (a) the repo
 - Agent-to-agent commerce rails are being standardized _this year_ — you cannot start a rails-adjacent trust company after the rails set.
 - Regulatory teeth: EU AI Act auditability obligations create a forced compliance budget.
 - Payment-network economics: chargeback / dispute adjudication for agent commerce needs court-survivable evidence.
-- The competing IETF drafts (AIP, APS, DRP, EP, SPICE, HDP) all **explicitly punt** the same hard problems to "an external transparency log" that nobody has built cross-org.
+- The agent-delegation drafts that address completeness — **DRP** (`draft-nelson-agent-delegation-receipts`, SHOULD → an external SCITT transparency log) and the **EMILIA/EP** cross-org-mapping line — **defer it to an external, still-unbuilt cross-org transparency log**; the rest (**HDP**, **APS**'s general-chain case) leave omission/completeness unsolved. _(Corrected per `RESEARCH_VERIFICATION.md`: not "every draft punts to a log" — SPICE is a verifiable-credentials WG, not an agent-delegation competitor; APS mostly self-solves via internal cascade records.)_
 
 **Why it's a company and not a feature:** the delegation token is commoditizing (good — it's our substrate). The **witness network** that anchors completeness across organizations has network effects a standard cannot absorb: a spec can define a log format, but someone still has to _run the cross-org anchor_, and it gets more valuable as more agents emit receipts to it.
 
@@ -82,7 +82,7 @@ This is the most important section. Overclaiming here is the fastest way to lose
 | Sub-problem                                          | Status                                                                 | Our seam?                        |
 | ---------------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------- |
 | Per-hop authenticity & integrity                     | Solved (Ed25519/ECDSA + content-addressing)                            | No                               |
-| Recursive multi-hop chaining                         | Crowded (AIP, APS, DRP, HDP, SPICE)                                    | No                               |
+| Recursive multi-hop chaining                         | Crowded (AIP, APS, DRP, HDP)                                           | No                               |
 | Monotonic attenuation (narrow-only)                  | Crowded (AIP/Biscuit, APS lattice, DRP subset)                         | No                               |
 | Cross-org offline verification (no callback)         | Mostly solved (APS imported roots, HDP, EP)                            | No                               |
 | **Omission / completeness**                          | **Open** (all punt to "external log"; theoretical limit)               | **YES — lead here**              |
@@ -106,7 +106,7 @@ This is the most important section. Overclaiming here is the fastest way to lose
   - Block N (Delegation): delegator→delegatee, attenuated scope, **mandatory purpose/context field**.
   - Block N+1 (Completion): result hash, verification status, cost — **self-reported by default** (this is the seam).
   - Transport: a token in an HTTP header on every tool call (mirror AIP's `X-AIP-Token`).
-- **Rails we sit ON (never against):** AP2 (agent payment mandates), MCP (agent→tool), A2A (agent→agent), Web Bot Auth (per-request Ed25519 header signing). AP2 binds a mandate to a _user, not a chain_ — its own spec names "Delegated Trust" and "Temporal Gaps" as open. That seam is ours.
+- **Rails we sit ON (never against):** AP2 (agent payment mandates), MCP (agent→tool), A2A (agent→agent), Web Bot Auth (per-request Ed25519 header signing, RFC 9421). **Correction (`RESEARCH_VERIFICATION.md`):** AP2 _does_ support delegation chains (SD-JWT `cnf` key-binding), and "Delegated Trust / Temporal Gaps" are **not** AP2's own named open problems ("Temporal Gaps" is a third-party term). Our real seam over AP2: it yields an audit trail but has **no cross-org transparency mechanism for omission and no independent completion attestation** — we make AP2 chains' attribution tamper-evident and dispute-defensible.
 
 ### Our layer (the three deliverables)
 
@@ -141,12 +141,29 @@ Four candidate forms; standards absorption is the existential risk, so choose th
 
 ## 8. POSITIONING — WHAT WE SAY / DON'T SAY
 
-**Say:**
+**Category to own — say it until analysts repeat it back: "chain-of-authority" (agent authority attribution).** Do _not_ call ourselves "agentic commerce infrastructure" (173-logo map, we drown). Position into the emptier, higher-status dispute/accountability frame.
+
+**The one-liner:**
+
+- "index-one is the tamper-evident chain-of-authority layer for multi-agent actions. When an action crosses companies and something goes wrong, we're the cryptographic proof of who authorized what — the black box for agent delegation."
+
+**The three sharp contrasts (memorize):**
+
+- **vs. rails (AP2 / Visa TAP / MC Agent Pay):** "They prove the _user consented_ to a purchase. We prove _whose authority reached the final action_ across every hop in between — and we work on top of all of them."
+- **vs. identity (Skyfire KYA / ERC-8004):** "They prove _who the agent is_. We prove _what authority legitimately flowed to it_. Identity without authority-flow doesn't survive a dispute."
+- **vs. on-chain (ERC-8004):** "Proof lives in the token, verified locally in microseconds. No chain, no registry lookup, no gas. Fail-closed by default." _(This no-blockchain stance is a real, marketable wedge against the on-chain crowd and works inside enterprises that will never touch a registry contract.)_
+
+**Also say:**
 
 - "We're the witness and independent-attestation layer for cross-org agent delegation."
 - "Everyone can prove the token narrowed; nobody can prove the chain was complete, honestly reported, and attributable across companies. We do that."
-- "We build on AIP and Biscuit. We ship what they explicitly punt."
+- "We build on AIP and Biscuit. AP2 gives you an audit trail; we make that trail dispute-defensible."
 - Urgency stat (verify first): a large share of scanned MCP servers reportedly lacked authentication — the house is already delegating money with no lock. _(Reproduce before quoting.)_
+
+**Preempt the two investor objections (raise them first, you win the room):**
+
+- _"Won't AP2 / Visa / MC absorb this?"_ → "The rails can't credibly own a neutral cross-vendor attribution standard without breaking neutrality — same reason Certificate Transparency wasn't owned by a single CA. Our no-blockchain, local-verify architecture is also something the on-chain registries structurally can't match."
+- _"Isn't this space just an acquisition pipeline?"_ → "For the wallets and rails, yes. We're the standard that sits above all of them. Standards get adopted, not absorbed — and if the outcome is strategic, we're the neutral asset every network needs and none can let a competitor own."
 
 **Don't say:**
 
@@ -270,11 +287,11 @@ Reach via public LinkedIn/X/Discord with the Section 10 opener. Do not fabricate
 
 1. **AIP** (Agent Identity Protocol / IBCT) — closest prior art; read its **limitations section hardest**, it names your seams. ★★★
 2. **AI-identity survey** (five gaps: semantic intent, recursive delegation accountability, agent identity integrity, governance enforcement, operational sustainability) — your opening slide. ★★★
-3. **WIMSE cross-org delegation problem statement** — enumerates the requirements (R1–R9); proposes no mechanism. Your spec. ★★★
+3. **IETF WIMSE architecture** (`draft-ietf-wimse-arch`, §3.3.8 "AI and ML-Based Intermediaries" + §3.3.4) — recognizes the multi-hop cross-org risk, specifies only per-hop re-binding. _(No "R1–R9 problem statement" exists — that was fabricated; see `RESEARCH_VERIFICATION.md`.)_ ★★★
 4. **APS** (Agent Passport System) — most complete competitor; understand its lattice + receipts + its conformance suite. ★★
 5. **Biscuit** — your substrate; Clever Cloud tutorial + biscuitsec.org spec; learn Datalog. ★★
 6. **Macaroons** — foundational attenuation paper (why offline narrowing works). ★
-7. **DRP** / **EP-AEC** drafts — the transparency-log punt and the composition layer's "cross-binding attack." ★
+7. **DRP** (`draft-nelson-agent-delegation-receipts`) / **EP-AEG** (EMILIA Action Evidence _Graph_) drafts — the transparency-log deferral. _(It's EP-AE**G**, not "EP-AEC"; the "cross-binding attack" is not a named result in any primary source — don't quote it as reproduced. See `RESEARCH_VERIFICATION.md`.)_ ★
 8. **South et al.** (Authenticated Delegation) + **OpenID** whitepaper — credible voices; cite for _accountability_, not _intent_. ★
 9. **AP2** repo — confirm the mandate format from the actual spec files before quoting. ★
 10. **SCITT** + **Certificate Transparency (RFC 6962)** — the witness/gossip discipline you build on. ★
