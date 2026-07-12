@@ -26,9 +26,12 @@ cargo run --manifest-path services/witness/Cargo.toml --bin indexone-witness-ser
 ```
 
 `INDEXONE_WITNESS_DB` points at a durable append-only log file. When set, every
-submitted receipt is persisted (and flushed) before it is acked, and the whole
-tree — root, size, and all inclusion proofs — is replayed from the file on
-restart, so a restart does not lose or fork the log.
+submitted receipt is persisted and **`fsync`'d to the physical device** before it
+is acked, so an acked entry survives power loss / kernel panic, not just a clean
+exit. The whole tree — root, size, and all inclusion proofs — is replayed from
+the file on restart, so a restart does not lose or fork the log; a **torn
+trailing frame** from a crash mid-append (never acked) is truncated and recovered
+on open, rather than refusing to start.
 
 ## API (RFC 6962 §4 / SCITT SCRAPI aligned)
 
