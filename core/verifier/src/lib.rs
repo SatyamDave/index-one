@@ -20,7 +20,7 @@
 //! or whose completion was **self-reported**, must return `INVALID` here even
 //! though the chain alone verifies.
 
-use indexone_attestation::CompletionAttestation;
+use indexone_attestation::{CompletionAttestation, ThresholdAttestation, ThresholdError};
 use indexone_chain::{Chain, ChainError, Scope};
 use indexone_crypto::PublicKey;
 use indexone_witness::{verify_inclusion, ActionReceipt, Digest};
@@ -35,6 +35,19 @@ pub struct VerifiableAction {
     /// The independent completion attestation (carries its own witnessed root
     /// and inclusion proof).
     pub completion: CompletionAttestation,
+}
+
+/// [`VerifiableAction`] but with a k-of-n [`ThresholdAttestation`] in place of a
+/// single completion. Verified by [`verify_threshold`].
+#[derive(Debug, Clone)]
+pub struct VerifiableThresholdAction {
+    /// The delegation chain the action ran under.
+    pub chain: Chain,
+    /// The receipt that must be present in the witness for this action.
+    pub action_receipt: ActionReceipt,
+    /// The k-of-n bundle of independent completion attestations (each member
+    /// carries its own witnessed root and inclusion proof).
+    pub completion: ThresholdAttestation,
 }
 
 /// Why a verification failed. Each variant names the exact claimed property
@@ -55,6 +68,25 @@ pub enum VerifyError {
     OutcomeMismatch,
     #[error("chain binding mismatch: receipt/attestation do not bind to this chain")]
     ChainBindingMismatch,
+    /// The canonical action digest is not consistent across its views: what the
+    /// attestation says was *requested* is not what the witness *recorded* (and,
+    /// via the outcome gate, was attested). An executor that did something other
+    /// than what was asked — and got it faithfully logged and attested — still
+    /// fails here. Guards the "inconsistent canonical action digest" attack
+    /// (CLAUDE.md §6 deliverable #3).
+    #[error(
+        "action digest inconsistent: the requested action is not the one recorded in the witness"
+    )]
+    ActionDigestInconsistent,
+    /// A k-of-n bundle failed its threshold/independence rule.
+    #[error("threshold attestation failed: {0}")]
+    Threshold(#[from] ThresholdError),
+    /// The presenter's k-of-n bundle declares a threshold below the bar this
+    /// verifier requires. The sufficiency bar is verifier policy, never
+    /// presenter-controlled — a bundle declaring a smaller `k` is rejected
+    /// before its signatures are even examined.
+    #[error("insufficient attestation: verifier requires {required} independent attesters, presenter declared {declared}")]
+    InsufficientAttestation { required: usize, declared: usize },
 }
 
 /// Verify a cross-org action against a trusted root key and a gossip-trusted
@@ -100,7 +132,89 @@ pub fn verify(
         return Err(VerifyError::OutcomeMismatch);
     }
 
+    // 5b. Canonical action-digest consistency: what was *requested* must equal
+    //     what the witness recorded (and, via the outcome gate, what was
+    //     attested). Blocks an in-scope-but-different-from-requested action that
+    //     was faithfully logged and attested from slipping through.
+    if action.completion.requested_action_digest != action.action_receipt.action_digest {
+        return Err(VerifyError::ActionDigestInconsistent);
+    }
+
     // 7. Nothing unresolved — accept, returning what the final hop may do.
+    Ok(scope)
+}
+
+/// [`verify`], with a k-of-n [`ThresholdAttestation`] in place of the single
+/// completion. Same gates and fail-closed posture, plus a **presenter-cannot-
+/// dilute sufficiency bar**: `required_threshold` is *this verifier's* policy,
+/// and a bundle whose declared `threshold` is below it is rejected before any
+/// signature is examined (CLAUDE.md §6 deliverable #3). Every bundle member must
+/// bind this chain, commit to the gossip-trusted root, and carry a valid
+/// inclusion proof; the k-of-n independence rule is enforced by
+/// [`ThresholdAttestation::verify`].
+pub fn verify_threshold(
+    action: &VerifiableThresholdAction,
+    root_key: &PublicKey,
+    trusted_root: &Digest,
+    required_threshold: usize,
+) -> Result<Scope, VerifyError> {
+    // 1–2. Signatures + monotonic attenuation across the chain.
+    let scope = action.chain.verify(root_key)?;
+    let chain_digest = action.chain.digest();
+    let bundle = &action.completion;
+
+    // 5a. Sufficiency bar first: the presenter cannot weaken the verifier's
+    //     policy by declaring a smaller k.
+    if bundle.threshold < required_threshold {
+        return Err(VerifyError::InsufficientAttestation {
+            required: required_threshold,
+            declared: bundle.threshold,
+        });
+    }
+
+    // 3. The receipt and every attestation must bind to *this* chain.
+    if action.action_receipt.chain_digest != chain_digest
+        || bundle
+            .attestations
+            .iter()
+            .any(|a| a.chain_digest != chain_digest)
+    {
+        return Err(VerifyError::ChainBindingMismatch);
+    }
+
+    // 6. Non-equivocation: every attestation must commit to the gossip root.
+    if bundle
+        .attestations
+        .iter()
+        .any(|a| a.witnessed_root != *trusted_root)
+    {
+        return Err(VerifyError::Equivocation);
+    }
+
+    // 4. Completeness: every attester's inclusion proof must show the receipt
+    //    under the witnessed root. An attester vouching with a proof that does
+    //    not verify has attested an unwitnessed action — fail closed.
+    for a in &bundle.attestations {
+        if !verify_inclusion(&action.action_receipt, &a.inclusion, trusted_root) {
+            return Err(VerifyError::Omission);
+        }
+    }
+
+    // 5. The k-of-n independence rule (distinct keys, none the executor, shared
+    //    binding, ≥ threshold individually valid).
+    bundle.verify(action.chain.executor_key())?;
+
+    // 5b. Outcome + requested-digest consistency. The bundle's binding
+    //     consistency was just enforced, so checking one member covers all.
+    for a in &bundle.attestations {
+        if a.outcome_digest != action.action_receipt.action_digest {
+            return Err(VerifyError::OutcomeMismatch);
+        }
+        if a.requested_action_digest != action.action_receipt.action_digest {
+            return Err(VerifyError::ActionDigestInconsistent);
+        }
+    }
+
     Ok(scope)
 }
 
@@ -338,6 +452,213 @@ mod tests {
         assert_eq!(
             verify(&va, &world.root_key, &root).unwrap_err(),
             VerifyError::OutcomeMismatch
+        );
+    }
+
+    // A fresh third-party attester key, independent of the chain and executor.
+    fn third_party() -> Ed25519Signer {
+        Ed25519Signer::from_seed([9u8; 32])
+    }
+
+    #[test]
+    fn spliced_receipt_from_another_chain_is_rejected() {
+        // Receipt-splicing: a receipt minted for a *different* chain is presented
+        // against this one. Chain-binding must reject it before anything else.
+        let world = build_chain();
+        let action = [42u8; 32];
+        let (mut receipt, proof, root) = record(&world.chain, action);
+        receipt.chain_digest[0] ^= 0xFF; // now bound to a foreign chain
+        let completion = CompletionAttestation::attest(
+            &world.attester,
+            principal("agent:b@org2"),
+            world.chain.digest(),
+            action,
+            action,
+            root,
+            proof,
+        );
+        let va = VerifiableAction {
+            chain: world.chain,
+            action_receipt: receipt,
+            completion,
+        };
+        assert_eq!(
+            verify(&va, &world.root_key, &root).unwrap_err(),
+            VerifyError::ChainBindingMismatch
+        );
+    }
+
+    #[test]
+    fn spliced_attestation_from_another_chain_is_rejected() {
+        // The dual: a completion attestation bound to a different chain digest.
+        let world = build_chain();
+        let action = [42u8; 32];
+        let (receipt, proof, root) = record(&world.chain, action);
+        let mut foreign = world.chain.digest();
+        foreign[0] ^= 0xFF;
+        let completion = CompletionAttestation::attest(
+            &world.attester,
+            principal("agent:b@org2"),
+            foreign, // attestation minted against a foreign chain
+            action,
+            action,
+            root,
+            proof,
+        );
+        let va = VerifiableAction {
+            chain: world.chain,
+            action_receipt: receipt,
+            completion,
+        };
+        assert_eq!(
+            verify(&va, &world.root_key, &root).unwrap_err(),
+            VerifyError::ChainBindingMismatch
+        );
+    }
+
+    #[test]
+    fn requested_action_differs_from_witnessed_is_rejected() {
+        // Inconsistent canonical action digest: the witness recorded (and the
+        // attester observed as outcome) action X, but the attestation claims a
+        // *different* requested action Y. Faithfully logged and attested, yet a
+        // different action than asked — must fail closed.
+        let world = build_chain();
+        let witnessed = [42u8; 32];
+        let (receipt, proof, root) = record(&world.chain, witnessed);
+        let completion = CompletionAttestation::attest(
+            &world.attester,
+            principal("agent:b@org2"),
+            world.chain.digest(),
+            [99u8; 32], // requested != witnessed
+            witnessed,  // outcome == witnessed, so the outcome gate passes
+            root,
+            proof,
+        );
+        let va = VerifiableAction {
+            chain: world.chain,
+            action_receipt: receipt,
+            completion,
+        };
+        assert_eq!(
+            verify(&va, &world.root_key, &root).unwrap_err(),
+            VerifyError::ActionDigestInconsistent
+        );
+    }
+
+    #[test]
+    fn threshold_two_of_two_independent_verifies() {
+        // Two distinct attesters independent of the executor (delegator B + an
+        // outside third party) over the same action → the k-of-n bundle holds.
+        let world = build_chain();
+        let action = [42u8; 32];
+        let (receipt, proof, root) = record(&world.chain, action);
+        let cd = world.chain.digest();
+        let a1 = CompletionAttestation::attest(
+            &world.attester,
+            principal("agent:b@org2"),
+            cd,
+            action,
+            action,
+            root,
+            proof.clone(),
+        );
+        let a2 = CompletionAttestation::attest(
+            &third_party(),
+            principal("attester:notary"),
+            cd,
+            action,
+            action,
+            root,
+            proof,
+        );
+        let bundle = ThresholdAttestation {
+            attestations: vec![a1, a2],
+            threshold: 2,
+        };
+        let vta = VerifiableThresholdAction {
+            chain: world.chain,
+            action_receipt: receipt,
+            completion: bundle,
+        };
+        let effective = verify_threshold(&vta, &world.root_key, &root, 2).unwrap();
+        assert_eq!(effective.budget, Some(4_000));
+    }
+
+    #[test]
+    fn threshold_below_verifier_bar_is_rejected() {
+        // Presenter-controlled sufficiency: a bundle declaring k=1 cannot satisfy
+        // a verifier that requires 2, even if that one attestation is valid.
+        let world = build_chain();
+        let action = [42u8; 32];
+        let (receipt, proof, root) = record(&world.chain, action);
+        let a1 = CompletionAttestation::attest(
+            &world.attester,
+            principal("agent:b@org2"),
+            world.chain.digest(),
+            action,
+            action,
+            root,
+            proof,
+        );
+        let bundle = ThresholdAttestation {
+            attestations: vec![a1],
+            threshold: 1, // presenter tries to lower the bar
+        };
+        let vta = VerifiableThresholdAction {
+            chain: world.chain,
+            action_receipt: receipt,
+            completion: bundle,
+        };
+        assert_eq!(
+            verify_threshold(&vta, &world.root_key, &root, 2).unwrap_err(),
+            VerifyError::InsufficientAttestation {
+                required: 2,
+                declared: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn threshold_with_a_self_report_lacks_independence() {
+        // A 2-of-2 bundle where one "attester" is the executor signing its own
+        // work: only one independent attestation counts, so k is unmet.
+        let world = build_chain();
+        let action = [42u8; 32];
+        let (receipt, proof, root) = record(&world.chain, action);
+        let cd = world.chain.digest();
+        let independent = CompletionAttestation::attest(
+            &world.attester,
+            principal("agent:b@org2"),
+            cd,
+            action,
+            action,
+            root,
+            proof.clone(),
+        );
+        let self_report = CompletionAttestation::attest(
+            &world.executor, // C attests its own work — does not count
+            principal("agent:c@org3"),
+            cd,
+            action,
+            action,
+            root,
+            proof,
+        );
+        let bundle = ThresholdAttestation {
+            attestations: vec![independent, self_report],
+            threshold: 2,
+        };
+        let vta = VerifiableThresholdAction {
+            chain: world.chain,
+            action_receipt: receipt,
+            completion: bundle,
+        };
+        assert_eq!(
+            verify_threshold(&vta, &world.root_key, &root, 2).unwrap_err(),
+            VerifyError::Threshold(ThresholdError::NotEnoughIndependentAttestations {
+                have: 1,
+                need: 2,
+            })
         );
     }
 }
