@@ -263,12 +263,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "indexone-revlog"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "indexone-crypto",
+ "indexone-revmap",
+ "indexone-witness",
+ "serde",
+]
+
+[[package]]
+name = "indexone-revmap"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "serde",
+]
+
+[[package]]
+name = "indexone-revocation"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "indexone-chain",
+ "indexone-crypto",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "indexone-verifier"
 version = "0.0.1"
 dependencies = [
  "indexone-attestation",
  "indexone-chain",
  "indexone-crypto",
+ "indexone-revlog",
+ "indexone-revocation",
  "indexone-witness",
  "thiserror",
 ]
