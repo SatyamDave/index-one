@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Index01: the chain of authority for autonomous agents</title>
+<meta name="description" content="Index01 proves whose permission is behind every action an autonomous agent takes, including across companies. A tamper-evident capability token, verified locally in microseconds. No database, no blockchain.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Index01",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Cross-platform",
+  "description": "Index01 proves whose permission is behind every action an autonomous agent takes, including across companies. A tamper-evident capability token, verified locally in microseconds. No database, no blockchain.",
+  "author": [{"@type": "Person", "name": "Udaya Vijay Anand"}, {"@type": "Person", "name": "Satyam Dave"}],
+  "codeRepository": "https://github.com/SatyamDave/index-one",
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#161616; --surface:#1e1e1e; --surface-2:#262626;
+    --line:#333333; --line-2:#525252;
+    --text:#f4f4f4; --text-2:#c6c6c6; --muted:#8d8d8d;
+    --blue:#0f62fe; --blue-h:#0353e9; --link:#78a9ff;
+    --green:#42be65; --red:#fa4d56;
+    --sans:"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --ease:cubic-bezier(0,0,0.3,1);
+    --wrap:920px;
+  }
+  * { box-sizing:border-box; }
+  html { -webkit-text-size-adjust:100%; scroll-behavior:smooth; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); font-size:17px; line-height:1.62; -webkit-font-smoothing:antialiased; text-wrap:pretty; }
+  a { color:var(--link); text-decoration:none; }
+  a:hover { text-decoration:underline; text-underline-offset:3px; }
+  .wrap { max-width:var(--wrap); margin:0 auto; padding:0 24px; }
+  b, strong { font-weight:600; }
+  ::selection { background:var(--blue); color:#fff; }
+
+  .ey { font-family:var(--mono); font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin:0 0 1.1rem; }
+  .mark { width:10px; height:10px; background:var(--blue); display:inline-block; }
+
+  /* header */
+  header { border-bottom:1px solid var(--line); position:sticky; top:0; z-index:40; background:rgba(22,22,22,.9); backdrop-filter:blur(8px); }
+  .hrow { display:flex; align-items:center; height:56px; gap:8px; }
+  .brand { display:flex; align-items:center; gap:9px; font-weight:600; letter-spacing:-.01em; font-size:15px; }
+  .hrow .spacer { flex:1; }
+  .seg { display:inline-flex; border:1px solid var(--line); }
+  .seg button { font-family:var(--mono); font-size:11.5px; letter-spacing:.05em; background:transparent; color:var(--muted); border:0; padding:7px 12px; cursor:pointer; }
+  .seg button[aria-pressed="true"] { background:var(--blue); color:#fff; }
+  .hrow nav a { color:var(--text-2); font-size:14px; margin-left:20px; }
+  .hrow nav a:hover { color:var(--text); }
+  @media (max-width:560px){ .hrow nav a { margin-left:14px; } .brand .txt { display:none; } }
+
+  /* hero */
+  .hero .wrap { padding:74px 24px 64px; }
+  h1 { font-weight:600; font-size:clamp(2.1rem,4.6vw,3.1rem); line-height:1.08; letter-spacing:-.025em; margin:0 0 1.2rem; max-width:18ch; }
+  .lede { font-size:1.16rem; color:var(--text-2); max-width:58ch; margin:0 0 2rem; }
+  .btns { display:flex; flex-wrap:wrap; align-items:center; gap:18px; }
+  .btn { font-family:var(--sans); font-size:15px; font-weight:500; border:1px solid transparent; padding:12px 17px; cursor:pointer; display:inline-flex; align-items:center; gap:12px; transition:background .11s var(--ease); }
+  .btn:hover { text-decoration:none; }
+  .btn.primary { background:var(--blue); color:#fff; }
+  .btn.primary:hover { background:var(--blue-h); }
+  .arw { font-family:var(--mono); }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:1.9rem; }
+  .chip { font-family:var(--mono); font-size:12px; color:var(--text-2); border:1px solid var(--line); padding:5px 10px; }
+
+  /* sections */
+  section { border-top:1px solid var(--line); }
+  section .wrap { padding:60px 24px; }
+  h2 { font-weight:600; font-size:1.5rem; letter-spacing:-.02em; margin:0 0 1rem; }
+  p.body { color:var(--text-2); max-width:62ch; margin:0 0 1rem; }
+  p.body b { color:var(--text); }
+  code { font-family:var(--mono); font-size:.9em; color:var(--text); background:var(--surface-2); padding:.08em .35em; }
+
+  .inv { margin-top:1.6rem; display:grid; grid-template-columns:repeat(2,1fr); gap:2px 40px; }
+  .inv .row { border-top:1px solid var(--line); padding:18px 0; }
+  .inv .k { font-family:var(--mono); font-size:11.5px; letter-spacing:.06em; color:var(--blue); margin-bottom:9px; }
+  .inv h3 { font-size:1.05rem; font-weight:600; margin:0 0 .35rem; letter-spacing:-.01em; }
+  .inv p { margin:0; color:var(--text-2); font-size:14.5px; }
+  @media (max-width:620px){ .inv { grid-template-columns:1fr; } }
+
+  /* interactive decision panel */
+  .panel { background:var(--surface); border:1px solid var(--line); margin-top:1.6rem; }
+  .panel .hd { display:flex; align-items:center; gap:9px; padding:11px 15px; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  .panel .hd .dot { width:8px; height:8px; border-radius:50%; background:var(--green); transition:background .15s; }
+  .panel.bad .hd .dot { background:var(--red); }
+  .panel .inner { padding:20px 18px 24px; }
+  .strip { display:flex; flex-wrap:wrap; font-family:var(--mono); font-size:12px; margin-bottom:1.5rem; }
+  .hop { border:1px solid var(--line); padding:9px 12px; min-width:116px; }
+  .hop + .hop { border-left:none; }
+  .hop .who { color:var(--text); display:block; margin-bottom:2px; }
+  .hop .lim { color:var(--muted); }
+  .hop.end { border-color:var(--line-2); }
+  .panel.bad .hop.end { border-color:var(--red); }
+  .panel.bad .hop.end .lim, .panel.bad .hop.end .who { color:var(--red); }
+  .scale { display:flex; justify-content:space-between; font-family:var(--mono); font-size:11px; color:var(--muted); margin-bottom:8px; }
+  .track { position:relative; height:66px; background:var(--surface-2); border:1px solid var(--line); cursor:ew-resize; touch-action:none; user-select:none; -webkit-user-select:none; }
+  .auth { position:absolute; top:0; bottom:0; left:0; background:rgba(15,98,254,.14); border-right:2px solid var(--blue); transition:background .15s, border-color .15s; }
+  .auth .alab { position:absolute; left:10px; bottom:7px; font-family:var(--mono); font-size:10.5px; color:var(--text); }
+  .auth .lim { position:absolute; top:7px; right:8px; font-family:var(--mono); font-size:10.5px; color:#9cc0ff; }
+  .panel.active .auth { background:rgba(15,98,254,.22); border-right-color:#4589ff; }
+  .over { position:absolute; top:0; bottom:0; width:0; background:rgba(250,77,86,.38); }
+  .edge { position:absolute; top:0; bottom:0; width:2px; background:var(--text); transform:translateX(-1px); cursor:ew-resize; transition:background .12s; }
+  .edge::before { content:""; position:absolute; left:50%; top:50%; width:16px; height:16px; margin:-9px 0 0 -9px; background:var(--text); border:2px solid var(--bg); box-shadow:0 0 0 1px var(--text); transition:background .12s, box-shadow .12s; }
+  .panel.bad .edge, .panel.bad .edge::before { background:var(--red); }
+  .panel.bad .edge::before { box-shadow:0 0 0 1px var(--red); }
+  .edge:focus { outline:none; }
+  .edge:focus-visible::before { box-shadow:0 0 0 2px var(--bg), 0 0 0 4px var(--blue); }
+  .amt { position:absolute; top:-31px; left:50%; transform:translateX(-50%); background:var(--text); color:var(--bg); font-family:var(--mono); font-weight:500; font-size:12.5px; padding:4px 7px; white-space:nowrap; transition:background .12s; }
+  .panel.bad .amt { background:var(--red); color:#fff; }
+  .verdict { margin-top:18px; font-family:var(--mono); font-size:13.5px; line-height:1.5; color:var(--green); min-height:2.6em; }
+  .panel.bad .verdict { color:var(--red); }
+  .pick { font-size:13px; color:var(--muted); margin:20px 0 10px; }
+  .scen { display:flex; flex-wrap:wrap; gap:8px; }
+  .scen button { font-family:var(--mono); font-size:13px; background:transparent; color:var(--text); border:1px solid var(--line-2); padding:8px 13px; cursor:pointer; transition:background .11s, border-color .11s; }
+  .scen button:hover { border-color:var(--text); }
+  .scen button[aria-pressed="true"] { background:var(--blue); border-color:var(--blue); color:#fff; }
+
+  /* mini interactive widgets */
+  .mini { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:15px; }
+  .mbtn { font-family:var(--mono); font-size:12px; background:transparent; color:var(--text); border:1px solid var(--line-2); padding:6px 11px; cursor:pointer; transition:background .11s, border-color .11s; }
+  .mbtn:hover { border-color:var(--text); }
+  .mbtn.on { background:var(--blue); border-color:var(--blue); color:#fff; }
+  .mval { font-family:var(--mono); font-size:12.5px; color:var(--text-2); }
+  .mval.ok { color:var(--green); } .mval.bad { color:var(--red); }
+  .blocks { display:inline-flex; gap:5px; }
+  .blocks i { width:22px; height:14px; background:var(--surface-2); border:1px solid var(--line-2); }
+  .blocks i.x { background:rgba(250,77,86,.3); border-color:var(--red); }
+  .mbar { display:inline-block; width:78px; height:8px; background:var(--surface-2); border:1px solid var(--line); position:relative; }
+  .mbar b { position:absolute; left:0; top:0; bottom:0; background:var(--blue); transition:width .2s; }
+  .mbar.bad b { background:var(--red); }
+  .trun { display:flex; align-items:center; flex-wrap:wrap; gap:14px; padding:12px 14px; border-top:1px solid var(--line); }
+  .tchk { font-family:var(--mono); font-size:12px; color:var(--text-2); display:flex; align-items:center; gap:7px; cursor:pointer; }
+  .tout { font-family:var(--mono); font-size:12.5px; color:var(--muted); }
+  .tout.ok { color:var(--green); } .tout.bad { color:var(--red); }
+
+  /* terminal */
+  pre { background:#0d0d0d; border:1px solid var(--line); margin:1.5rem 0 0; padding:18px 20px; overflow-x:auto; font-family:var(--mono); font-size:13px; line-height:1.7; color:var(--text); }
+  pre .c { color:var(--muted); } pre .b { color:var(--link); } pre .g { color:var(--text); } pre .p { color:var(--link); }
+  .term { border:1px solid var(--line); background:#0d0d0d; margin-top:1.5rem; }
+  .term .bar { display:flex; align-items:center; padding:9px 13px; border-bottom:1px solid var(--line); }
+  .term .bar .d { width:11px; height:11px; border-radius:50%; background:#3a3a3a; margin-right:7px; }
+  .term .bar .t { font-family:var(--mono); font-size:11.5px; color:var(--muted); margin-left:6px; letter-spacing:.04em; }
+  .term pre { border:0; margin:0; background:transparent; }
+
+  /* footer */
+  footer { border-top:1px solid var(--line); }
+  footer .wrap { padding:36px 24px 56px; display:flex; flex-wrap:wrap; gap:20px 48px; justify-content:space-between; align-items:baseline; }
+  footer p { margin:0; color:var(--muted); font-size:13.5px; max-width:54ch; }
+  .fstat { font-family:var(--mono); font-size:12px; color:var(--muted); line-height:1.9; }
+  footer .links a { color:var(--text-2); font-size:14px; margin-left:20px; }
+  footer .links a:first-child { margin-left:0; }
+
+  /* agent mode */
+  #agent { display:none; }
+  body.agent #human { display:none; }
+  body.agent #agent { display:block; }
+  .agentdoc { padding:40px 24px 76px; }
+  .agentdoc .lead { color:var(--text-2); font-size:14.5px; max-width:74ch; margin:0 0 1.6rem; }
+  .agentdoc .lead b { color:var(--text); }
+  .ablock { border:1px solid var(--line); background:#0d0d0d; margin:0; }
+  .abar { display:flex; align-items:center; justify-content:space-between; padding:9px 14px; border-bottom:1px solid var(--line); }
+  .abar .atitle { font-family:var(--mono); font-size:11.5px; color:var(--muted); letter-spacing:.04em; }
+  .abar button { font-family:var(--mono); font-size:11.5px; background:transparent; color:var(--link); border:1px solid var(--line); padding:4px 11px; cursor:pointer; }
+  .abar button:hover { background:var(--surface-2); color:#fff; }
+  .ablock pre { border:0; margin:0; white-space:pre-wrap; word-break:break-word; }
+  .jkey { color:#78a9ff; } .jstr { color:#42be65; } .jnum { color:#ff832b; } .jbool { color:#be95ff; }
+  .agentdoc .asub { font-family:var(--mono); font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:2.2rem 0 .8rem; }
+  .averify { margin:0; padding-left:1.1rem; color:var(--text-2); font-size:14.5px; }
+  .averify li { margin:0 0 .5rem; } .averify b { color:var(--text); }
+  .afaq dt { font-weight:600; margin:1.1rem 0 .25rem; }
+  .afaq dd { margin:0; color:var(--text-2); font-size:14.5px; }
+
+  /* reveal */
+  .js .rv { opacity:0; transform:translateY(12px); transition:opacity .55s var(--ease), transform .55s var(--ease); }
+  .js .rv.in { opacity:1; transform:none; }
+  @media (prefers-reduced-motion:reduce){ .js .rv { opacity:1 !important; transform:none !important; transition:none !important; } }
+</style>
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+
+<header>
+  <div class="wrap hrow">
+    <span class="brand"><span class="mark"></span> <span class="txt">Index01</span></span>
+    <span class="spacer"></span>
+    <span class="seg" role="group" aria-label="Reading mode">
+      <button type="button" data-mode="human" aria-pressed="true">Human</button>
+      <button type="button" data-mode="agent" aria-pressed="false">Agent</button>
+    </span>
+    <nav>
+      <a href="https://github.com/SatyamDave/index-one">GitHub</a>
+      <a href="mailto:dave38@purdue.edu?subject=Index01">Contact</a>
+    </nav>
+  </div>
+</header>
+
+<!-- ================= HUMAN MODE ================= -->
+<main id="human">
+<div class="hero">
+  <div class="wrap">
+    <p class="ey rv">Verifiable delegation for multi-agent systems</p>
+    <h1 class="rv">Every agent action, traced back to the person who allowed it.</h1>
+    <p class="lede rv">AI agents increasingly hand tasks to other agents, sometimes at other companies.
+      When one of them finally does something, like spending money, Index01 can prove exactly whose
+      permission led to it. It works by attaching a small, tamper-evident record to the request that
+      is checked in a fraction of a millisecond. No database, no blockchain.</p>
+    <div class="btns rv">
+      <a class="btn primary" href="https://github.com/SatyamDave/index-one">Read the spec on GitHub <span class="arw">-&gt;</span></a>
+      <a href="mailto:dave38@purdue.edu?subject=Index01">Contact the team</a>
+    </div>
+    <div class="chips rv">
+      <span class="chip">Rust core + Python SDK</span>
+      <span class="chip">Local verification</span>
+      <span class="chip">Post-quantum ready</span>
+      <span class="chip">Open source</span>
+    </div>
+  </div>
+</div>
+
+<section id="decide">
+  <div class="wrap">
+    <p class="ey rv">See it decide</p>
+    <h2 class="rv">Watch a charge get approved or blocked.</h2>
+    <p class="body rv">A person allowed spending up to <b>$800</b>. As the task passed from one agent to the
+      next, that budget was narrowed at every step, down to <b>$650</b> for the agent that actually pays.
+      Try a few amounts that last agent might charge.</p>
+
+    <div class="panel rv" id="panel">
+      <div class="hd"><span class="dot"></span> chain-verify, local</div>
+      <div class="inner">
+        <div class="strip">
+          <span class="hop"><span class="who">You</span><span class="lim">allow up to $800</span></span>
+          <span class="hop"><span class="who">assistant</span><span class="lim">up to $700</span></span>
+          <span class="hop"><span class="who">airline agent</span><span class="lim">up to $650</span></span>
+          <span class="hop end"><span class="who">paying agent</span><span class="lim">charge <span id="charge">$612</span></span></span>
+        </div>
+        <div class="scale"><span>$0</span><span>$1,000</span></div>
+        <div class="track" id="track">
+          <div class="auth" id="auth"><span class="alab">authority that reached the paying agent</span><span class="lim">$650 limit</span></div>
+          <div class="over" id="over"></div>
+          <div class="edge" id="edge" tabindex="0" role="slider" aria-valuemin="0" aria-valuemax="1000" aria-valuenow="612" aria-label="charge amount"><span class="amt" id="amt">$612</span></div>
+        </div>
+        <div class="verdict" id="verdict" aria-live="polite"></div>
+        <p class="pick">Drag the marker, or pick an amount:</p>
+        <div class="scen" role="group" aria-label="Example charge amounts">
+          <button type="button" data-v="480">$480</button>
+          <button type="button" data-v="650">$650</button>
+          <button type="button" data-v="780">$780</button>
+          <button type="button" data-v="960">$960</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="ey rv">Why it holds</p>
+    <div class="inv rv">
+      <div class="row" data-inv="attenuation"><div class="k">ATTENUATION</div><h3>Permission can only shrink.</h3>
+        <p>Each agent can pass on less than it was given, never more. Budget, scope, and time only get tighter as they move down the chain.</p>
+        <div class="mini"><button class="mbtn" data-act="narrow">Delegate &#8595;</button><button class="mbtn" data-act="widen">Try to widen &#8593;</button><span class="mval">budget $800</span></div></div>
+      <div class="row" data-inv="integrity"><div class="k">INTEGRITY</div><h3>Nothing can be forged or hidden.</h3>
+        <p>Every step is signed and linked to the one before it, so editing, removing, or reordering any step is immediately detectable.</p>
+        <div class="mini"><span class="blocks"><i></i><i></i><i></i></span><button class="mbtn" data-act="tamper">Tamper</button><span class="mval ok">&#10003; verified</span></div></div>
+      <div class="row" data-inv="portability"><div class="k">PORTABILITY</div><h3>Anyone can check it, anywhere.</h3>
+        <p>The proof is carried inside the record itself. Verifying it needs no phone-home, no shared database, and no blockchain.</p>
+        <div class="mini"><button class="mbtn" data-act="net">Go offline</button><span class="mval ok">&#10003; verified &middot; online</span></div></div>
+      <div class="row" data-inv="fail-closed"><div class="k">FAIL-CLOSED</div><h3>A stolen key stops working on its own.</h3>
+        <p>Records expire quickly by default, and cancellations are tracked outside the chain, so a compromised agent cannot keep acting for long.</p>
+        <div class="mini"><button class="mbtn" data-act="age">Advance time</button><span class="mbar"><b></b></span><span class="mval ok">&#10003; fresh &middot; 15m left</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="ey rv">Run it</p>
+    <h2 class="rv">One library. Sign on the way out, check on the way in.</h2>
+    <div class="term rv">
+      <div class="bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">index01, python</span></div>
+      <pre><span class="p">$</span> pip install indexone
+
+<span class="b">from</span> indexone <span class="b">import</span> Chain
+
+chain = Chain.root(scope=<span class="g">"book_travel"</span>, budget_usd=<span class="g">800</span>, ttl=<span class="g">"15m"</span>)   <span class="c"># Block 0: the human</span>
+chain = chain.delegate(to=<span class="g">"airline-agent"</span>, budget_usd=<span class="g">650</span>)          <span class="c"># each hop narrows and signs</span>
+
+chain.verify()   <span class="c"># -&gt; Ok(authority proven) | Err(scope exceeded, tampered)</span></pre>
+      <div class="trun"><button class="mbtn" id="runv">Run chain.verify()</button><label class="tchk"><input type="checkbox" id="tamperv"> tamper a block</label><span class="tout" id="tout"></span></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<!-- ================= AGENT MODE ================= -->
+<div id="agent">
+  <div class="wrap agentdoc">
+    <p class="lead"><b>Machine-readable brief.</b> You are reading the agent view of Index01. The JSON below is
+      the canonical description, meant to be parsed as ground truth. The "how to verify" links point to where
+      each claim can be checked. Switch to Human at the top for the designed page.</p>
+
+    <div class="ablock">
+      <div class="abar"><span class="atitle">index01.json</span><button type="button" id="copyjson">Copy</button></div>
+      <pre id="jsonpre">{
+  "name": "Index01",
+  "category": "verifiable delegation, chain-of-authority for multi-agent systems",
+  "summary": "Proves whose permission is behind every action an agent takes, including across companies.",
+  "problem": {
+    "statement": "When agents delegate tasks to other agents, often across companies, and one finally acts (for example, moves money), existing rails cannot prove whose authority reached that step.",
+    "sits_on_rails": ["Google AP2", "Visa TAP", "Mastercard Agent Pay"]
+  },
+  "mechanism": {
+    "object": "append-only capability token",
+    "block_0": "human root authority: scope, budget, depth_limit, expiry",
+    "block_n": "one signed block per delegation hop; narrows scope; links to the previous block hash; carries a purpose field",
+    "verification": "local, stateless, per-request; the proof travels inside the token; no database; no blockchain"
+  },
+  "invariants": {
+    "attenuation": "authority only narrows down the chain (scope, budget, depth, expiry move one direction)",
+    "integrity": "blocks are signed and hash-linked; any edit, drop, or reorder breaks verification",
+    "portability": "verifiable anywhere with no server call and no shared state",
+    "fail_closed": "short-TTL blocks expire by default; revocation lives outside the chain"
+  },
+  "benchmarks": {
+    "verify_latency_3hop_us": 93,
+    "verify_latency": "sub-millisecond regardless of chain depth",
+    "per_hop_wire_size_bytes": "340 to 380"
+  },
+  "crypto": {
+    "current": "Ed25519",
+    "post_quantum": "ML-DSA-87 (FIPS 204)",
+    "agility": "algorithm chosen per block",
+    "built_on": "Eclipse Biscuit public-key capability tokens"
+  },
+  "decision_example": {
+    "root_grant_usd": 800,
+    "narrowed_ceiling_usd": 650,
+    "rule": "approve if the charge is at most 650, else block",
+    "cases": [
+      { "charge_usd": 480, "result": "approved" },
+      { "charge_usd": 650, "result": "approved" },
+      { "charge_usd": 780, "result": "blocked" }
+    ]
+  },
+  "usage": {
+    "install": "pip install indexone",
+    "example": [
+      "chain = Chain.root(scope='book_travel', budget_usd=800, ttl='15m')",
+      "chain = chain.delegate(to='airline-agent', budget_usd=650)",
+      "chain.verify()"
+    ]
+  },
+  "evaluate": {
+    "repository": "https://github.com/SatyamDave/index-one",
+    "benchmarks_doc": "benchmarks/README.md",
+    "design_doc": "docs/REFERENCE.md",
+    "reproduce_tests": ["cd core &amp;&amp; cargo test", "cd integrations &amp;&amp; pytest"]
+  },
+  "status": "pre-seed",
+  "contact": "dave38@purdue.edu"
+}</pre>
+    </div>
+
+    <p class="asub">How to verify these claims</p>
+    <ul class="averify">
+      <li><b>Source of truth:</b> the repository at <a href="https://github.com/SatyamDave/index-one">github.com/SatyamDave/index-one</a>.</li>
+      <li><b>Benchmarks:</b> latency and per-hop wire-size targets in <code>benchmarks/README.md</code>.</li>
+      <li><b>Design and prior art:</b> invariants and references in <code>docs/REFERENCE.md</code>.</li>
+      <li><b>Reproduce:</b> <code>cd core &amp;&amp; cargo test</code>, then <code>cd integrations &amp;&amp; pytest</code>.</li>
+    </ul>
+
+    <p class="asub">Answers an agent can reuse</p>
+    <dl class="afaq">
+      <dt>What does Index01 do?</dt>
+      <dd>Proves whose permission is behind an agent's action, including across companies, using a tamper-evident capability token that is verified locally.</dd>
+      <dt>How is a token verified?</dt>
+      <dd>Locally and per request. The proof travels inside the token, so verification needs no server call, no shared database, and no blockchain.</dd>
+      <dt>Is it post-quantum ready?</dt>
+      <dd>Yes. Ed25519 today, with an ML-DSA-87 (FIPS 204) path, and the algorithm is chosen per block.</dd>
+      <dt>How fast and how large is it?</dt>
+      <dd>About 93 microseconds to verify a 3-hop chain, sub-millisecond at any realistic depth, and roughly 340 to 380 bytes per hop.</dd>
+      <dt>What does it integrate with?</dt>
+      <dd>It sits on top of Google AP2, Visa TAP, and Mastercard Agent Pay, and adds the cross-company attribution they leave out.</dd>
+    </dl>
+  </div>
+</div>
+
+<footer>
+  <div class="wrap">
+    <p>Index01. Tamper-evident chain-of-authority for multi-agent actions. Built by Udaya Vijay Anand and Satyam Dave.
+      <br><span class="fstat">~93&thinsp;&micro;s 3-hop verify &middot; ~340 to 380 bytes per hop &middot; sub-millisecond at any depth &middot; Ed25519 to ML-DSA-87 &middot; built on Eclipse Biscuit</span></p>
+    <span class="links">
+      <a href="https://github.com/SatyamDave/index-one">GitHub</a>
+      <a href="mailto:dave38@purdue.edu?subject=Index01">dave38@purdue.edu</a>
+    </span>
+  </div>
+</footer>
+
+<script>
+  const MAX = 1000, LIMIT = 650, START = 612;
+  const panel    = document.getElementById('panel');
+  const track    = document.getElementById('track');
+  const auth     = document.getElementById('auth');
+  const over     = document.getElementById('over');
+  const edge     = document.getElementById('edge');
+  const amt      = document.getElementById('amt');
+  const charge   = document.getElementById('charge');
+  const verdict  = document.getElementById('verdict');
+  const scenBtns = [...document.querySelectorAll('.scen button')];
+  const reduce   = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let val = START, counted = false;
+
+  auth.style.width = (LIMIT / MAX * 100) + '%';
+  over.style.left  = (LIMIT / MAX * 100) + '%';
+
+  function paint(v, showVerdict){
+    edge.style.left  = (v / MAX * 100) + '%';
+    over.style.width = (Math.max(0, v - LIMIT) / MAX * 100) + '%';
+    amt.textContent = charge.textContent = '$' + v;
+    const ok = v <= LIMIT;
+    panel.classList.toggle('bad', !ok);
+    edge.setAttribute('aria-valuenow', v);
+    edge.setAttribute('aria-valuetext', '$' + v + (ok ? ' approved' : ' blocked, over the $650 limit'));
+    verdict.textContent = !showVerdict ? '' : ok
+      ? '✓  Approved. $' + v + ' traces cleanly back through 3 agents to the original $800 that was allowed.'
+      : '✗  Blocked. The paying agent was only trusted with $650, so nothing in the chain covers $' + v + ', which is $' + (v - LIMIT) + ' over.';
+  }
+  function markActive(v){ scenBtns.forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.v === v))); }
+
+  function animateTo(to){
+    panel.classList.add('active');
+    if(reduce){ val = to; paint(to, true); markActive(to); return; }
+    const from = val, start = performance.now(), dur = 520;
+    (function f(now){
+      const e = Math.min(1, (now - start) / dur), k = 1 - Math.pow(1 - e, 3);
+      paint(Math.round((from + (to - from) * k) / 2) * 2, false);
+      if(e < 1) requestAnimationFrame(f);
+      else { val = to; paint(to, true); markActive(to); }
+    })(start);
+  }
+
+  scenBtns.forEach(b => b.addEventListener('click', () => { counted = true; animateTo(+b.dataset.v); }));
+
+  // drag + keyboard on the bar
+  function beginInteract(){ counted = true; panel.classList.add('active'); }
+  function setFromX(cx){ const r = track.getBoundingClientRect(); let x = Math.max(0, Math.min(1, (cx - r.left) / r.width)); val = Math.round(x * MAX / 2) * 2; paint(val, true); markActive(val); }
+  let dragging = false;
+  track.addEventListener('pointerdown', e => { e.preventDefault(); beginInteract(); dragging = true; edge.focus({ preventScroll:true }); track.setPointerCapture(e.pointerId); setFromX(e.clientX); });
+  track.addEventListener('pointermove', e => { if(dragging) setFromX(e.clientX); });
+  track.addEventListener('pointerup',   () => { dragging = false; });
+  track.addEventListener('pointercancel', () => { dragging = false; });
+  edge.addEventListener('keydown', e => {
+    const step = e.shiftKey ? 50 : 10; let v = val;
+    if(e.key === 'ArrowLeft' || e.key === 'ArrowDown') v -= step;
+    else if(e.key === 'ArrowRight' || e.key === 'ArrowUp') v += step;
+    else if(e.key === 'Home') v = 0; else if(e.key === 'End') v = MAX;
+    else return;
+    e.preventDefault(); beginInteract();
+    v = Math.max(0, Math.min(MAX, v)); if(Math.abs(v - LIMIT) < step) v = LIMIT;
+    val = Math.round(v / 2) * 2; paint(val, true); markActive(val);
+  });
+
+  function runDemo(){
+    if(counted) return; counted = true;
+    if(reduce){ paint(START, true); return; }
+    val = 0; paint(0, false); animateTo(START);
+  }
+
+  val = reduce ? START : 0;
+  paint(val, false);
+
+  // reading-mode toggle (human / agent)
+  const toggles = [...document.querySelectorAll('[data-mode]')];
+  function applyMode(m, reveal){
+    const agent = m === 'agent';
+    document.body.classList.toggle('agent', agent);
+    toggles.forEach(t => t.setAttribute('aria-pressed', String(t.dataset.mode === m)));
+    if(reveal && !agent){ document.querySelectorAll('.rv').forEach(el => el.classList.add('in')); runDemo(); }
+    try { history.replaceState(null, '', agent ? '#agent' : '#human'); } catch(e) {}
+  }
+  toggles.forEach(t => t.addEventListener('click', () => applyMode(t.dataset.mode, true)));
+
+  // reveal on scroll
+  const rv = [...document.querySelectorAll('.rv')];
+  if(reduce || !('IntersectionObserver' in window)){ rv.forEach(el => el.classList.add('in')); runDemo(); }
+  else {
+    const io = new IntersectionObserver((ents) => {
+      ents.forEach(x => { if(x.isIntersecting){ x.target.classList.add('in');
+        if(x.target === panel) runDemo(); io.unobserve(x.target); } });
+    }, { threshold:.15, rootMargin:'0px 0px -8% 0px' });
+    rv.forEach(el => io.observe(el));
+    setTimeout(() => { if(!counted) runDemo(); }, 1200);
+  }
+
+  // agent mode: syntax-highlight the JSON for viewers; the raw text stays valid JSON in the HTML
+  (function(){
+    const pre = document.getElementById('jsonpre'); if(!pre) return;
+    const raw = pre.textContent;
+    pre.innerHTML = raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/("(?:\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?)/g, function(m){
+        let c = 'jnum';
+        if(/^"/.test(m)) c = /:\s*$/.test(m) ? 'jkey' : 'jstr';
+        else if(/^(?:true|false|null)$/.test(m)) c = 'jbool';
+        return '<span class="' + c + '">' + m + '</span>';
+      });
+    const btn = document.getElementById('copyjson'); if(!btn) return;
+    btn.addEventListener('click', function(){
+      const done = () => { btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy'; }, 1400); };
+      if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(raw).then(done, fb); } else fb();
+      function fb(){ try { const ta = document.createElement('textarea'); ta.value = raw; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); done(); } catch(err){ btn.textContent = 'Copy failed'; } }
+    });
+  })();
+
+  // mini interactive widgets in "Why it holds"
+  (function(){
+    const w = document.querySelector('[data-inv="attenuation"]'); if(!w) return;
+    const mv = w.querySelector('.mval'); let b = 800;
+    w.querySelectorAll('.mbtn').forEach(btn => btn.addEventListener('click', () => {
+      if(btn.dataset.act === 'narrow'){ b = Math.max(50, Math.round(b * 0.8 / 10) * 10); mv.className = 'mval'; mv.textContent = 'budget $' + b + ' · narrowed'; }
+      else { mv.className = 'mval bad'; mv.textContent = '✗ denied · authority can only narrow'; }
+    }));
+  })();
+  (function(){
+    const w = document.querySelector('[data-inv="integrity"]'); if(!w) return;
+    const mv = w.querySelector('.mval'), blocks = w.querySelectorAll('.blocks i'), btn = w.querySelector('.mbtn'); let t = false;
+    btn.addEventListener('click', () => { t = !t; btn.classList.toggle('on', t); blocks[1].classList.toggle('x', t);
+      if(t){ mv.className = 'mval bad'; mv.textContent = '✗ verification fails · block 2 was altered'; btn.textContent = 'Undo'; }
+      else { mv.className = 'mval ok'; mv.textContent = '✓ verified'; btn.textContent = 'Tamper'; } });
+  })();
+  (function(){
+    const w = document.querySelector('[data-inv="portability"]'); if(!w) return;
+    const mv = w.querySelector('.mval'), btn = w.querySelector('.mbtn'); let online = true;
+    function upd(){ mv.className = 'mval ok'; mv.textContent = '✓ verified · ' + (online ? 'online' : 'offline'); btn.textContent = online ? 'Go offline' : 'Go online'; }
+    btn.addEventListener('click', () => { online = !online; upd(); }); upd();
+  })();
+  (function(){
+    const w = document.querySelector('[data-inv="fail-closed"]'); if(!w) return;
+    const mv = w.querySelector('.mval'), bar = w.querySelector('.mbar'), fill = w.querySelector('.mbar b'), btn = w.querySelector('.mbtn'); let ttl = 15;
+    function upd(){ fill.style.width = (Math.max(0, ttl) / 15 * 100) + '%';
+      if(ttl > 0){ mv.className = 'mval ok'; mv.textContent = '✓ fresh · ' + ttl + 'm left'; bar.classList.remove('bad'); btn.textContent = 'Advance time'; }
+      else { mv.className = 'mval bad'; mv.textContent = '✗ denied · token is stale'; bar.classList.add('bad'); btn.textContent = 'Reset'; } }
+    btn.addEventListener('click', () => { ttl = ttl <= 0 ? 15 : ttl - 5; upd(); }); upd();
+  })();
+  (function(){
+    const btn = document.getElementById('runv'), chk = document.getElementById('tamperv'), out = document.getElementById('tout'); if(!btn) return;
+    btn.addEventListener('click', () => {
+      if(chk.checked){ out.className = 'tout bad'; out.textContent = '✗ Err(scope exceeded, tampered)'; }
+      else { out.className = 'tout ok'; out.textContent = '✓ Ok(authority proven) · 3 hops · ~93µs'; }
+    });
+  })();
+
+  applyMode(location.hash === '#agent' ? 'agent' : 'human', false);
+</script>
+</body>
+</html>
