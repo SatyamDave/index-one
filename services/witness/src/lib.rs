@@ -12,6 +12,7 @@
 //!   GET  /witness/v1/proof         — inclusion proof by leaf_index       (get-proof-by-hash/index)
 //!   GET  /witness/v1/consistency   — consistency proof first→second      (get-sth-consistency)
 //!   POST /witness/v1/gossip        — reconcile a peer STH → consistent | equivocation proof
+//!   GET  /witness/v1/checkpoint    — C2SP tlog-checkpoint signed note (cosignable)
 //!   GET  /.well-known/witness-keys — the operator's public key (verify offline)
 //!
 //! Fail-closed: a bad request, a stale `prev_root`, or a detected equivocation
@@ -30,6 +31,7 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use indexone_checkpoint::{sign_checkpoint, Checkpoint};
 use indexone_crypto::{Ed25519Signer, PublicKey, Signature, Signer};
 use indexone_witness::{
     reconcile_heads, ActionReceipt, ConsistencyProof, Digest, EquivocationError, InclusionProof,
@@ -173,9 +175,14 @@ pub fn app(state: AppState) -> Router {
         .route("/witness/v1/proof", get(get_proof))
         .route("/witness/v1/consistency", get(get_consistency))
         .route("/witness/v1/gossip", post(gossip))
+        .route("/witness/v1/checkpoint", get(get_checkpoint))
         .route("/.well-known/witness-keys", get(get_keys))
         .with_state(state)
 }
+
+/// Default C2SP checkpoint origin (a schema-less log identity) when the caller
+/// does not pass `?origin=`.
+const DEFAULT_ORIGIN: &str = "indexone.dev/witness";
 
 // ── base64url helpers ───────────────────────────────────────────────────────
 
@@ -327,6 +334,12 @@ pub struct ProofQuery {
 pub struct ConsistencyQuery {
     first: usize,
     second: usize,
+}
+
+#[derive(Deserialize)]
+pub struct CheckpointQuery {
+    /// Schema-less log identity for the checkpoint; defaults to [`DEFAULT_ORIGIN`].
+    origin: Option<String>,
 }
 
 // ── Errors (fail closed) ────────────────────────────────────────────────────
@@ -496,6 +509,30 @@ async fn get_keys(State(st): State<AppState>) -> Json<KeysDto> {
             alg: "ed25519",
         }],
     })
+}
+
+/// The current tree head as a **C2SP `tlog-checkpoint`** signed note (text/plain)
+/// — the format the transparency.dev witness network reads and cosigns. The note
+/// key name is the origin, so a client that pins `/.well-known/witness-keys` can
+/// verify it with `indexone_checkpoint::verify_checkpoint`.
+async fn get_checkpoint(
+    State(st): State<AppState>,
+    Query(q): Query<CheckpointQuery>,
+) -> impl IntoResponse {
+    let origin = q.origin.unwrap_or_else(|| DEFAULT_ORIGIN.to_string());
+    let sth = {
+        let w = st.witness.lock().expect("witness mutex poisoned");
+        w.signed_head(&*st.log_signer)
+    };
+    let checkpoint = Checkpoint::from_sth(origin.clone(), &sth);
+    let note = sign_checkpoint(&st.log_signer, &origin, &checkpoint);
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        note,
+    )
 }
 
 #[cfg(test)]
@@ -697,6 +734,44 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["keys"][0]["alg"], "ed25519");
         assert_eq!(body["keys"][0]["public_key"], b64(&st.log_key.bytes));
+    }
+
+    /// The `/checkpoint` endpoint serves a C2SP signed note that verifies against
+    /// the operator key and commits the current tree head — the format the
+    /// transparency.dev witness network reads and cosigns.
+    #[tokio::test]
+    async fn checkpoint_is_a_verifiable_c2sp_note() {
+        use indexone_checkpoint::verify_checkpoint;
+        let st = state();
+        let root0 = current_root(&st).await;
+        json_request(
+            app(st.clone()),
+            "POST",
+            "/witness/v1/entries",
+            receipt_json(1, &root0),
+        )
+        .await;
+
+        let resp = app(st.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/witness/v1/checkpoint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let note = String::from_utf8(bytes.to_vec()).unwrap();
+
+        let cp = verify_checkpoint(&note, "indexone.dev/witness", &st.log_key)
+            .expect("checkpoint note must verify under the operator key");
+        assert_eq!(cp.origin, "indexone.dev/witness");
+        let w = st.witness.lock().unwrap();
+        assert_eq!(cp.size, w.len());
+        assert_eq!(cp.root, w.root());
     }
 
     fn temp_log_path() -> std::path::PathBuf {
