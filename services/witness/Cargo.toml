@@ -18,6 +18,9 @@ base64 = "0.22"
 hex = "0.4"
 indexone-witness = { path = "../../core/witness" }
 indexone-crypto = { path = "../../core/crypto" }
+# C2SP tlog-checkpoint / signed-note: emit the STH in the format the
+# transparency.dev witness network reads and cosigns.
+indexone-checkpoint = { path = "../../clients/checkpoint" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

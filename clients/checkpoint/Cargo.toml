@@ -1,0 +1,19 @@
+[package]
+name = "indexone-checkpoint"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "C2SP tlog-checkpoint / signed-note format for the IndexOne witness: emit the signed tree head as a standard checkpoint that the transparency.dev witness network can read and COSIGN (the N-of-M non-equivocation foundation). Interop layer — keeps base64/sha2/note formatting out of the lean core."
+
+# Standalone package (like /clients/revocation-http). base64 + sha2 are the
+# note format's own primitives (SHA-256 key-id, standard base64) — distinct from
+# the core's blake3 tree hashing, and deliberately not pulled into /core.
+[dependencies]
+base64 = "0.22"
+sha2 = "0.10"
+indexone-crypto = { path = "../../core/crypto" }
+indexone-witness = { path = "../../core/witness" }
+
+[lib]
+name = "indexone_checkpoint"
+path = "src/lib.rs"
