@@ -27,7 +27,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use sha2::{Digest as _, Sha256};
 
 use indexone_crypto::{verify_signature, Algorithm, Ed25519Signer, PublicKey, Signature, Signer};
-use indexone_witness::{Digest, SignedTreeHead};
+use indexone_witness::{verify_consistency, ConsistencyProof, Digest, SignedTreeHead};
 
 /// The note signature-algorithm byte for Ed25519 (C2SP signed-note).
 const ED25519_NOTE_ALG: u8 = 0x01;
@@ -174,6 +174,132 @@ pub fn verify_checkpoint(note: &str, key_name: &str, pubkey: &PublicKey) -> Opti
     Some(Checkpoint { origin, size, root })
 }
 
+// ── Witness cosigning (C2SP tlog-witness) + N-of-M quorum ───────────────────
+
+/// Why a witness refused to cosign a checkpoint.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CosignError {
+    /// The checkpoint is not validly signed by the log key this witness watches.
+    BadLogSignature,
+    /// The presented `old` size is not the size this witness last cosigned — the
+    /// client must re-fetch and retry (C2SP tlog-witness returns 409 + this size).
+    SizeMismatch { our_size: usize },
+    /// The new checkpoint is smaller than what this witness already cosigned — a
+    /// rollback, refused.
+    Rollback { our_size: usize, new_size: usize },
+    /// The consistency proof does not show the new tree is an append-only
+    /// extension of the last one this witness cosigned.
+    InconsistentProof,
+}
+
+/// A witness that cosigns one log's checkpoints (the C2SP `tlog-witness`
+/// `add-checkpoint` role). It remembers the last (size, root) it cosigned so it
+/// can enforce append-only extension and refuse rollbacks — the property that,
+/// across an N-of-M quorum, makes a forked/equivocating log detectable.
+pub struct CosigningWitness {
+    signer: Ed25519Signer,
+    key_name: String,
+    log_origin: String,
+    log_key: PublicKey,
+    /// The last checkpoint this witness cosigned for the watched log.
+    seen: Option<(usize, Digest)>,
+}
+
+impl CosigningWitness {
+    /// A fresh witness watching the log identified by `log_origin` + `log_key`,
+    /// cosigning under its own `key_name`.
+    pub fn new(
+        signer: Ed25519Signer,
+        key_name: impl Into<String>,
+        log_origin: impl Into<String>,
+        log_key: PublicKey,
+    ) -> CosigningWitness {
+        CosigningWitness {
+            signer,
+            key_name: key_name.into(),
+            log_origin: log_origin.into(),
+            log_key,
+            seen: None,
+        }
+    }
+
+    /// The size this witness last cosigned (0 if none yet).
+    pub fn last_size(&self) -> usize {
+        self.seen.map(|(s, _)| s).unwrap_or(0)
+    }
+
+    /// `add-checkpoint`: verify the log-signed `note` is a consistent append-only
+    /// extension of what this witness last cosigned, then return **its cosignature
+    /// line** over the same body (to be merged into the published note). Updates
+    /// the witness's last-seen state on success.
+    pub fn add_checkpoint(
+        &mut self,
+        note: &str,
+        old_size: usize,
+        consistency: &ConsistencyProof,
+    ) -> Result<String, CosignError> {
+        let cp = verify_checkpoint(note, &self.log_origin, &self.log_key)
+            .ok_or(CosignError::BadLogSignature)?;
+
+        let (our_size, our_root) = self.seen.unwrap_or((0, [0u8; 32]));
+        if old_size != our_size {
+            return Err(CosignError::SizeMismatch { our_size });
+        }
+        if cp.size < our_size {
+            return Err(CosignError::Rollback {
+                our_size,
+                new_size: cp.size,
+            });
+        }
+
+        // Append-only extension from our_size → cp.size. Extending from an empty
+        // (size-0) view is consistent for any tree with an empty proof (RFC 6962:
+        // the empty tree is a prefix of every tree).
+        let consistent = if our_size == 0 {
+            consistency.nodes.is_empty()
+        } else {
+            verify_consistency(&our_root, &cp.root, consistency, our_size, cp.size)
+        };
+        if !consistent {
+            return Err(CosignError::InconsistentProof);
+        }
+
+        self.seen = Some((cp.size, cp.root));
+        // Cosign the exact body the log signed.
+        let body = note_body(note).ok_or(CosignError::BadLogSignature)?;
+        Ok(signature_line(&body, &self.signer, &self.key_name))
+    }
+}
+
+/// Verify a checkpoint note carries at least `threshold` valid cosignatures from
+/// the named `witnesses`, all committing the **same** checkpoint. This is the
+/// N-of-M non-equivocation check — the upgrade of the verifier's step 6 from a
+/// single trusted root to a witness quorum. Returns the agreed [`Checkpoint`], or
+/// `None` if the quorum isn't met or two witnesses disagree on the root.
+pub fn verify_quorum(
+    note: &str,
+    witnesses: &[(&str, &PublicKey)],
+    threshold: usize,
+) -> Option<Checkpoint> {
+    let mut agreed: Option<Checkpoint> = None;
+    let mut count = 0usize;
+    for (name, key) in witnesses {
+        if let Some(cp) = verify_checkpoint(note, name, key) {
+            match &agreed {
+                None => agreed = Some(cp),
+                Some(existing) if *existing != cp => return None, // forked view
+                Some(_) => {}
+            }
+            count += 1;
+        }
+    }
+    if count >= threshold {
+        agreed
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +396,166 @@ mod tests {
         let got = verify_checkpoint(&note, "indexone", &op.public_key()).unwrap();
         assert_eq!(got.size, sth.tree_size);
         assert_eq!(got.root, sth.root);
+    }
+
+    // ── cosigning flow (tlog-witness) + quorum ──────────────────────────────
+
+    use indexone_witness::{ActionReceipt, Witness};
+
+    const ORIGIN: &str = "indexone.dev/witness";
+
+    fn receipt(tag: u8, prev: Digest) -> ActionReceipt {
+        ActionReceipt {
+            chain_digest: [tag; 32],
+            action_digest: [tag; 32],
+            nonce: [tag; 32],
+            prev_root: prev,
+        }
+    }
+
+    /// The log's current head as a checkpoint note (key name = origin).
+    fn log_note(log: &Ed25519Signer, w: &Witness) -> String {
+        let cp = Checkpoint::from_sth(ORIGIN, &w.signed_head(log));
+        sign_checkpoint(log, ORIGIN, &cp)
+    }
+
+    fn empty_proof() -> ConsistencyProof {
+        ConsistencyProof { nodes: vec![] }
+    }
+
+    /// A witness cosigns successive consistent extensions, and the cosigned note
+    /// meets a 2-of-2 quorum.
+    #[test]
+    fn witness_cosigns_extensions_and_quorum_holds() {
+        let log = Ed25519Signer::from_seed([1u8; 32]);
+        let wa = Ed25519Signer::from_seed([2u8; 32]);
+        let (log_key, wa_key) = (log.public_key(), wa.public_key());
+        let quorum = [(ORIGIN, &log_key), ("witness-a", &wa_key)];
+
+        let mut w = Witness::new();
+        let r1 = receipt(1, w.root());
+        w.append(&r1);
+        let note1 = log_note(&log, &w);
+
+        let mut witness = CosigningWitness::new(wa, "witness-a", ORIGIN, log_key.clone());
+        let line1 = witness
+            .add_checkpoint(&note1, 0, &empty_proof())
+            .expect("cosign size 1");
+        assert_eq!(witness.last_size(), 1);
+        let cosigned1 = format!("{note1}{line1}");
+        assert_eq!(verify_quorum(&cosigned1, &quorum, 2).unwrap().size, 1);
+
+        // Grow to size 2 and cosign with a real consistency proof.
+        let r2 = receipt(2, w.root());
+        w.append(&r2);
+        let note2 = log_note(&log, &w);
+        let proof = w.consistency_proof(1, 2).expect("consistency 1->2");
+        let line2 = witness
+            .add_checkpoint(&note2, 1, &proof)
+            .expect("cosign size 2");
+        assert_eq!(witness.last_size(), 2);
+        assert!(verify_quorum(&format!("{note2}{line2}"), &quorum, 2).is_some());
+    }
+
+    /// A witness refuses a wrong `old` size (needs a re-fetch) and a rollback.
+    #[test]
+    fn witness_refuses_size_mismatch_and_rollback() {
+        let log = Ed25519Signer::from_seed([3u8; 32]);
+        let log_key = log.public_key();
+        let mut w = Witness::new();
+        w.append(&receipt(1, w.root()));
+        let note1 = log_note(&log, &w);
+        let mut witness =
+            CosigningWitness::new(Ed25519Signer::from_seed([4u8; 32]), "wa", ORIGIN, log_key);
+        witness.add_checkpoint(&note1, 0, &empty_proof()).unwrap(); // our_size = 1
+
+        // Wrong `old` (0, but we last cosigned 1).
+        assert_eq!(
+            witness
+                .add_checkpoint(&note1, 0, &empty_proof())
+                .unwrap_err(),
+            CosignError::SizeMismatch { our_size: 1 }
+        );
+
+        // Advance to 2, then present the size-1 checkpoint as a rollback.
+        w.append(&receipt(2, w.root()));
+        let note2 = log_note(&log, &w);
+        let proof = w.consistency_proof(1, 2).unwrap();
+        witness.add_checkpoint(&note2, 1, &proof).unwrap(); // our_size = 2
+        assert_eq!(
+            witness
+                .add_checkpoint(&note1, 2, &empty_proof())
+                .unwrap_err(),
+            CosignError::Rollback {
+                our_size: 2,
+                new_size: 1,
+            }
+        );
+    }
+
+    /// A bogus consistency proof is refused (no append-only evidence).
+    #[test]
+    fn witness_rejects_inconsistent_proof() {
+        let log = Ed25519Signer::from_seed([5u8; 32]);
+        let log_key = log.public_key();
+        let mut w = Witness::new();
+        w.append(&receipt(1, w.root()));
+        let note1 = log_note(&log, &w);
+        let mut witness =
+            CosigningWitness::new(Ed25519Signer::from_seed([6u8; 32]), "wa", ORIGIN, log_key);
+        witness.add_checkpoint(&note1, 0, &empty_proof()).unwrap();
+        w.append(&receipt(2, w.root()));
+        let note2 = log_note(&log, &w);
+        let bogus = ConsistencyProof {
+            nodes: vec![[9u8; 32]],
+        };
+        assert_eq!(
+            witness.add_checkpoint(&note2, 1, &bogus).unwrap_err(),
+            CosignError::InconsistentProof
+        );
+    }
+
+    /// A checkpoint signed by a different log key is refused.
+    #[test]
+    fn witness_rejects_foreign_log() {
+        let log = Ed25519Signer::from_seed([7u8; 32]);
+        let impostor = Ed25519Signer::from_seed([8u8; 32]);
+        let mut w = Witness::new();
+        w.append(&receipt(1, w.root()));
+        let foreign_note = log_note(&impostor, &w);
+        let mut witness = CosigningWitness::new(
+            Ed25519Signer::from_seed([9u8; 32]),
+            "wa",
+            ORIGIN,
+            log.public_key(),
+        );
+        assert_eq!(
+            witness
+                .add_checkpoint(&foreign_note, 0, &empty_proof())
+                .unwrap_err(),
+            CosignError::BadLogSignature
+        );
+    }
+
+    /// The quorum only holds at or above the threshold count of known witnesses.
+    #[test]
+    fn quorum_requires_threshold() {
+        let log = Ed25519Signer::from_seed([10u8; 32]);
+        let wa = Ed25519Signer::from_seed([11u8; 32]);
+        let (log_key, wa_key) = (log.public_key(), wa.public_key());
+        let quorum = [(ORIGIN, &log_key), ("witness-a", &wa_key)];
+
+        let mut w = Witness::new();
+        w.append(&receipt(1, w.root()));
+        let note1 = log_note(&log, &w);
+
+        // Only the log has signed → 1 of 2. Threshold 2 not met; threshold 1 is.
+        assert!(verify_quorum(&note1, &quorum, 2).is_none());
+        assert!(verify_quorum(&note1, &quorum, 1).is_some());
+
+        // Witness-a cosigns → 2 of 2.
+        let mut witness = CosigningWitness::new(wa, "witness-a", ORIGIN, log_key.clone());
+        let line = witness.add_checkpoint(&note1, 0, &empty_proof()).unwrap();
+        assert!(verify_quorum(&format!("{note1}{line}"), &quorum, 2).is_some());
     }
 }
